@@ -41,11 +41,15 @@ class _DnsSettingsState extends State<DnsSettings> {
   bool _disableIpv6 = false;
   bool _enableDnssec = false;
   bool _enableEdns = false;
-  bool _populated = false;
+  bool _userModified = false;
 
   @override
   void initState() {
     super.initState();
+    final dnsProvider = Provider.of<DnsProvider>(context, listen: false);
+    if (dnsProvider.dnsInfo != null) {
+      _applyInfo(dnsProvider.dnsInfo!);
+    }
     _loadData();
   }
 
@@ -59,28 +63,28 @@ class _DnsSettingsState extends State<DnsSettings> {
 
   Future<void> _loadData() async {
     final dnsProvider = Provider.of<DnsProvider>(context, listen: false);
-    final ok = await dnsProvider.fetchDnsData(showLoading: true);
+    final ok = await dnsProvider.fetchDnsData(
+      showLoading: dnsProvider.dnsInfo == null,
+    );
     if (!mounted) return;
-    if (ok && dnsProvider.dnsInfo != null) {
-      _syncFromProvider(dnsProvider);
+    if (ok && dnsProvider.dnsInfo != null && !_userModified) {
+      setState(() {
+        _applyInfo(dnsProvider.dnsInfo!);
+      });
     }
   }
 
-  void _syncFromProvider(DnsProvider dnsProvider) {
-    final info = dnsProvider.dnsInfo;
-    if (info == null) return;
-    setState(() {
-      _upstreamController.text = info.upstreamDns.join('\n');
-      _bootstrapController.text = info.bootstrapDns.join('\n');
-      _fallbackController.text = (info.fallbackDns ?? []).join('\n');
-      _upstreamMode = info.upstreamMode ?? '';
-      _blockingMode = info.blockingMode == 'strong' ? 'strong' : 'default';
-      _optimisticCache = info.cacheOptimistic ?? true;
-      _disableIpv6 = info.disableIpv6;
-      _enableDnssec = info.dnssecEnabled;
-      _enableEdns = info.ednsCsEnabled;
-      _populated = true;
-    });
+  void _applyInfo(dynamic info) {
+    _upstreamController.text = info.upstreamDns.join('\n');
+    _bootstrapController.text = info.bootstrapDns.join('\n');
+    _fallbackController.text = (info.fallbackDns ?? []).join('\n');
+    final mode = info.upstreamMode ?? '';
+    _upstreamMode = (mode == 'load_balance') ? '' : mode;
+    _blockingMode = info.blockingMode == 'strong' ? 'strong' : 'default';
+    _optimisticCache = info.cacheOptimistic ?? true;
+    _disableIpv6 = info.disableIpv6;
+    _enableDnssec = info.dnssecEnabled;
+    _enableEdns = info.ednsCsEnabled;
   }
 
   List<String> _parseLines(String raw) {
@@ -91,34 +95,30 @@ class _DnsSettingsState extends State<DnsSettings> {
         .toList();
   }
 
-  void _applyPreset({
+  Future<void> _applyPreset({
     required List<String> upstreams,
     required List<String> bootstraps,
+    List<String>? fallbacks,
     required String mode,
     required String presetName,
-  }) {
+  }) async {
     HapticFeedback.lightImpact();
     setState(() {
+      _userModified = true;
       _upstreamController.text = upstreams.join('\n');
       _bootstrapController.text = bootstraps.join('\n');
+      if (fallbacks != null) {
+        _fallbackController.text = fallbacks.join('\n');
+      }
       _upstreamMode = mode;
     });
-    final appConfigProvider =
-        Provider.of<AppConfigProvider>(context, listen: false);
-    final isZh = Localizations.localeOf(context)
-        .languageCode
-        .toLowerCase()
-        .startsWith('zh');
-    showSnackbar(
-      appConfigProvider: appConfigProvider,
-      label: isZh
-          ? '已填入「$presetName」，点击右上角保存即可生效'
-          : 'Applied "$presetName" preset. Tap Save in the top-right to apply.',
-      color: Colors.green,
-    );
+    await _saveAll(silent: true, customSuccessLabel: '已应用并保存「$presetName」');
   }
 
-  Future<void> _saveAll() async {
+  Future<void> _saveAll({
+    bool silent = false,
+    String? customSuccessLabel,
+  }) async {
     final dnsProvider = Provider.of<DnsProvider>(context, listen: false);
     final appConfigProvider =
         Provider.of<AppConfigProvider>(context, listen: false);
@@ -142,8 +142,11 @@ class _DnsSettingsState extends State<DnsSettings> {
       return;
     }
 
-    final processModal = ProcessModal();
-    processModal.open(AppLocalizations.of(context)!.savingConfig);
+    ProcessModal? processModal;
+    if (!silent) {
+      processModal = ProcessModal();
+      processModal.open(AppLocalizations.of(context)!.savingConfig);
+    }
 
     final info = dnsProvider.dnsInfo;
     final result = await dnsProvider.saveUnifiedDnsConfig({
@@ -163,13 +166,13 @@ class _DnsSettingsState extends State<DnsSettings> {
       if (info?.ratelimit != null) 'ratelimit': info!.ratelimit,
     });
 
-    processModal.close();
+    processModal?.close();
     if (!mounted) return;
 
     if (result.successful) {
       showSnackbar(
         appConfigProvider: appConfigProvider,
-        label: AppLocalizations.of(context)!.dnsConfigSaved,
+        label: customSuccessLabel ?? AppLocalizations.of(context)!.dnsConfigSaved,
         color: Colors.green,
       );
     } else {
@@ -207,14 +210,6 @@ class _DnsSettingsState extends State<DnsSettings> {
         .languageCode
         .toLowerCase()
         .startsWith('zh');
-
-    if (dnsProvider.loadStatus == LoadStatus.loaded &&
-        !_populated &&
-        dnsProvider.dnsInfo != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _syncFromProvider(dnsProvider);
-      });
-    }
 
     return Scaffold(
       appBar: AppBar(
@@ -285,7 +280,7 @@ class _DnsSettingsState extends State<DnsSettings> {
                             avatar: const Icon(Icons.flash_on_rounded, size: 16),
                             label: Text(
                               isZh
-                                  ? '国内极速 (阿里 + 腾讯 DoH/DoQ)'
+                                  ? '国内极速 (阿里 + 腾讯 DoH)'
                                   : 'CN Fast (AliDNS + DNSPod)',
                               style: const TextStyle(fontSize: 12.5),
                             ),
@@ -294,13 +289,22 @@ class _DnsSettingsState extends State<DnsSettings> {
                                   ? '国内极速 (阿里 + 腾讯)'
                                   : 'CN Fast (AliDNS + DNSPod)',
                               upstreams: const [
-                                'https://dns.alidns.com/dns-query',
-                                'https://doh.pub/dns-query',
-                                'quic://dns.alidns.com',
+                                'https://223.5.5.5/dns-query',
+                                'https://1.12.12.12/dns-query',
                               ],
                               bootstraps: const [
                                 '223.5.5.5',
                                 '119.29.29.29',
+                                '223.6.6.6',
+                                '1.1.1.1',
+                                '8.8.8.8',
+                              ],
+                              fallbacks: const [
+                                'https://223.5.5.5/dns-query',
+                                'https://223.6.6.6/dns-query',
+                                'https://1.12.12.12/dns-query',
+                                'https://1.1.1.1/dns-query',
+                                'https://8.8.8.8/dns-query',
                               ],
                               mode: 'parallel',
                             ),
@@ -309,23 +313,38 @@ class _DnsSettingsState extends State<DnsSettings> {
                             avatar: const Icon(Icons.public_rounded, size: 16),
                             label: Text(
                               isZh
-                                  ? '海外优选 (Cloudflare + Google)'
-                                  : 'Global Fast (Cloudflare + Google)',
+                                  ? '海外优选 (CF + Google + 境内政务分流)'
+                                  : 'Global Fast (CF + Google + CN Split)',
                               style: const TextStyle(fontSize: 12.5),
                             ),
                             onPressed: () => _applyPreset(
                               presetName: isZh
-                                  ? '海外优选 (Cloudflare + Google)'
-                                  : 'Global Fast (Cloudflare + Google)',
+                                  ? '海外优选 (CF + Google + 境内政务分流)'
+                                  : 'Global Fast (CF + Google)',
                               upstreams: const [
-                                'https://cloudflare-dns.com/dns-query',
-                                'https://dns.google/dns-query',
-                                'quic://dns.adguard-dns.com',
+                                '[/gov.cn/edu.cn/12306.cn/]https://223.5.5.5/dns-query',
+                                '[/gov.cn/edu.cn/12306.cn/]https://1.12.12.12/dns-query',
+                                'https://1.1.1.1/dns-query',
+                                'https://1.0.0.1/dns-query',
+                                'https://8.8.8.8/dns-query',
+                                'https://9.9.9.9/dns-query',
                               ],
                               bootstraps: const [
                                 '1.1.1.1',
+                                '1.0.0.1',
                                 '8.8.8.8',
                                 '9.9.9.9',
+                                '223.5.5.5',
+                                '119.29.29.29',
+                              ],
+                              fallbacks: const [
+                                'https://1.1.1.1/dns-query',
+                                'https://1.0.0.1/dns-query',
+                                'https://8.8.8.8/dns-query',
+                                'https://8.8.4.4/dns-query',
+                                'https://9.9.9.9/dns-query',
+                                'https://223.5.5.5/dns-query',
+                                'https://1.12.12.12/dns-query',
                               ],
                               mode: 'parallel',
                             ),
@@ -343,7 +362,7 @@ class _DnsSettingsState extends State<DnsSettings> {
                                   ? '海外纯净隐私 (Quad9 + Mullvad)'
                                   : 'Global Privacy (Quad9 + Mullvad)',
                               upstreams: const [
-                                'https://dns.quad9.net/dns-query',
+                                'https://9.9.9.9/dns-query',
                                 'https://dns.mullvad.net/dns-query',
                               ],
                               bootstraps: const [
@@ -364,6 +383,7 @@ class _DnsSettingsState extends State<DnsSettings> {
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: TextFormField(
                         controller: _upstreamController,
+                        onChanged: (_) => _userModified = true,
                         minLines: 3,
                         maxLines: 6,
                         style: const TextStyle(
@@ -375,7 +395,7 @@ class _DnsSettingsState extends State<DnsSettings> {
                             borderRadius: BorderRadius.all(Radius.circular(10)),
                           ),
                           hintText:
-                              'https://dns.alidns.com/dns-query\nhttps://cloudflare-dns.com/dns-query',
+                              'https://1.1.1.1/dns-query\nhttps://8.8.8.8/dns-query',
                           helperText: isZh
                               ? '每行填写一个上游 DNS 地址（支持 DoH / DoT / DoQ / IP，# 开头为注释）'
                               : 'One upstream DNS server per line (DoH / DoT / DoQ / IP, # for comments)',
@@ -415,7 +435,11 @@ class _DnsSettingsState extends State<DnsSettings> {
                               : ''
                         },
                         onSelectionChanged: (v) {
-                          setState(() => _upstreamMode = v.first);
+                          setState(() {
+                            _userModified = true;
+                            _upstreamMode = v.first;
+                          });
+                          _saveAll(silent: true);
                         },
                       ),
                     ),
@@ -427,6 +451,7 @@ class _DnsSettingsState extends State<DnsSettings> {
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: TextFormField(
                         controller: _bootstrapController,
+                        onChanged: (_) => _userModified = true,
                         minLines: 2,
                         maxLines: 4,
                         style: const TextStyle(
@@ -452,6 +477,7 @@ class _DnsSettingsState extends State<DnsSettings> {
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: TextFormField(
                         controller: _fallbackController,
+                        onChanged: (_) => _userModified = true,
                         minLines: 1,
                         maxLines: 3,
                         style: const TextStyle(
@@ -497,34 +523,62 @@ class _DnsSettingsState extends State<DnsSettings> {
                         ],
                         selected: {_blockingMode},
                         onSelectionChanged: (v) {
-                          setState(() => _blockingMode = v.first);
+                          setState(() {
+                            _userModified = true;
+                            _blockingMode = v.first;
+                          });
+                          _saveAll(silent: true);
                         },
                       ),
                     ),
                     CustomSwitchListTile(
                       value: _optimisticCache,
-                      onChanged: (v) => setState(() => _optimisticCache = v),
+                      onChanged: (v) {
+                        setState(() {
+                          _userModified = true;
+                          _optimisticCache = v;
+                        });
+                        _saveAll(silent: true);
+                      },
                       title: AppLocalizations.of(context)!.optimisticCaching,
                       subtitle: AppLocalizations.of(context)!
                           .optimisticCachingDescription,
                     ),
                     CustomSwitchListTile(
                       value: _disableIpv6,
-                      onChanged: (v) => setState(() => _disableIpv6 = v),
+                      onChanged: (v) {
+                        setState(() {
+                          _userModified = true;
+                          _disableIpv6 = v;
+                        });
+                        _saveAll(silent: true);
+                      },
                       title: AppLocalizations.of(context)!.disableResolvingIpv6,
                       subtitle: AppLocalizations.of(context)!
                           .disableResolvingIpv6Description,
                     ),
                     CustomSwitchListTile(
                       value: _enableDnssec,
-                      onChanged: (v) => setState(() => _enableDnssec = v),
+                      onChanged: (v) {
+                        setState(() {
+                          _userModified = true;
+                          _enableDnssec = v;
+                        });
+                        _saveAll(silent: true);
+                      },
                       title: AppLocalizations.of(context)!.enableDnssec,
                       subtitle:
                           AppLocalizations.of(context)!.enableDnssecDescription,
                     ),
                     CustomSwitchListTile(
                       value: _enableEdns,
-                      onChanged: (v) => setState(() => _enableEdns = v),
+                      onChanged: (v) {
+                        setState(() {
+                          _userModified = true;
+                          _enableEdns = v;
+                        });
+                        _saveAll(silent: true);
+                      },
                       title: AppLocalizations.of(context)!.enableEdns,
                       subtitle:
                           AppLocalizations.of(context)!.enableEdnsDescription,
