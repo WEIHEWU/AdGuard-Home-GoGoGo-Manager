@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:percent_indicator/percent_indicator.dart';
 
 import 'package:adguard_home_manager/functions/number_format.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
@@ -14,26 +13,29 @@ class HomeSummaryCards extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final statusProvider = Provider.of<StatusProvider>(context);
-    final appConfigProvider = Provider.of<AppConfigProvider>(context);
+    final appConfigProvider =
+        Provider.of<AppConfigProvider>(context, listen: false);
     final logsProvider = Provider.of<LogsProvider>(context, listen: false);
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
     final locale = Localizations.localeOf(context).toString();
 
-    if (statusProvider.serverStatus == null) {
-      return const SizedBox();
+    final serverStatus = statusProvider.serverStatus;
+    if (serverStatus == null) {
+      return const SizedBox.shrink();
     }
 
-    final stats = statusProvider.serverStatus!.stats;
+    final stats = serverStatus.stats;
     final totalQueries = stats.numDnsQueries;
     final blockedQueries = stats.numBlockedFiltering;
-    final blockRate = totalQueries > 0
-        ? (blockedQueries / totalQueries)
-        : 0.0;
+    final blockRate =
+        totalQueries > 0 ? (blockedQueries / totalQueries) * 100 : 0.0;
     final avgLatencyMs = stats.avgProcessingTime * 1000;
+    final filters = serverStatus.filteringStatus.filters;
+    final totalRules = filters.fold<int>(0, (prev, f) => prev + f.rulesCount);
+    final enabledLists = filters.where((f) => f.enabled).length;
+    final customRulesCount = serverStatus.filteringStatus.userRules.length;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: Column(
         children: [
           Row(
@@ -42,15 +44,16 @@ class HomeSummaryCards extends StatelessWidget {
                 child: _SummaryCard(
                   title: 'DNS 查询总数',
                   primaryValue: intFormat(totalQueries, locale),
-                  secondaryValue: '平均耗时: ${doubleFormat(avgLatencyMs, locale)} ms',
+                  secondaryValue:
+                      '平均耗时: ${doubleFormat(avgLatencyMs, locale)} ms',
                   icon: Icons.dns_rounded,
                   iconColor: Colors.blue,
-                  percent: 1.0,
-                  progressColor: Colors.blue,
                   onTap: () {
                     HapticFeedback.lightImpact();
-                    logsProvider.setSelectedResultStatus(value: 'all', refetch: true);
-                    logsProvider.filterLogs();
+                    logsProvider.setSelectedResultStatus(
+                      value: 'all',
+                      refetch: true,
+                    );
                     appConfigProvider.setSelectedScreen(1);
                   },
                 ),
@@ -60,15 +63,15 @@ class HomeSummaryCards extends StatelessWidget {
                 child: _SummaryCard(
                   title: '拦截与去广告',
                   primaryValue: intFormat(blockedQueries, locale),
-                  secondaryValue: '拦截率: ${(blockRate * 100).toStringAsFixed(1)}%',
+                  secondaryValue: '拦截率: ${blockRate.toStringAsFixed(1)}%',
                   icon: Icons.block_rounded,
                   iconColor: Colors.red,
-                  percent: blockRate.clamp(0.0, 1.0),
-                  progressColor: Colors.red,
                   onTap: () {
                     HapticFeedback.lightImpact();
-                    logsProvider.setSelectedResultStatus(value: 'blocked', refetch: true);
-                    logsProvider.filterLogs();
+                    logsProvider.setSelectedResultStatus(
+                      value: 'blocked',
+                      refetch: true,
+                    );
                     appConfigProvider.setSelectedScreen(1);
                   },
                 ),
@@ -81,18 +84,13 @@ class HomeSummaryCards extends StatelessWidget {
               Expanded(
                 child: _SummaryCard(
                   title: '已加载规则总数',
-                  primaryValue: intFormat(
-                      statusProvider.serverStatus!.filteringStatus.filters
-                          .fold<int>(0, (prev, f) => prev + f.rulesCount),
-                      locale),
-                  secondaryValue:
-                      '启用订阅: ${statusProvider.serverStatus!.filteringStatus.filters.where((f) => f.enabled).length} 组',
+                  primaryValue: intFormat(totalRules, locale),
+                  secondaryValue: '启用订阅: $enabledLists 组',
                   icon: Icons.rule_rounded,
                   iconColor: Colors.teal,
-                  percent: 1.0,
-                  progressColor: Colors.teal,
                   onTap: () {
                     HapticFeedback.lightImpact();
+                    appConfigProvider.setSelectedFiltersTab(0, notify: false);
                     appConfigProvider.setSelectedScreen(2);
                   },
                 ),
@@ -101,18 +99,14 @@ class HomeSummaryCards extends StatelessWidget {
               Expanded(
                 child: _SummaryCard(
                   title: '自定义规则与白名单',
-                  primaryValue: intFormat(
-                      statusProvider.serverStatus!.filteringStatus.userRules.length,
-                      locale),
-                  secondaryValue: statusProvider.serverStatus!.generalEnabled
-                      ? '保护运行中'
-                      : '保护已暂停',
+                  primaryValue: intFormat(customRulesCount, locale),
+                  secondaryValue:
+                      serverStatus.generalEnabled ? '保护运行中' : '保护已暂停',
                   icon: Icons.playlist_add_check_rounded,
                   iconColor: Colors.purple,
-                  percent: 1.0,
-                  progressColor: Colors.purple,
                   onTap: () {
                     HapticFeedback.lightImpact();
+                    appConfigProvider.setSelectedFiltersTab(1, notify: false);
                     appConfigProvider.setSelectedScreen(2);
                   },
                 ),
@@ -125,14 +119,12 @@ class HomeSummaryCards extends StatelessWidget {
   }
 }
 
-class _SummaryCard extends StatefulWidget {
+class _SummaryCard extends StatelessWidget {
   final String title;
   final String primaryValue;
   final String secondaryValue;
   final IconData icon;
   final Color iconColor;
-  final double percent;
-  final Color progressColor;
   final VoidCallback onTap;
 
   const _SummaryCard({
@@ -141,96 +133,65 @@ class _SummaryCard extends StatefulWidget {
     required this.secondaryValue,
     required this.icon,
     required this.iconColor,
-    required this.percent,
-    required this.progressColor,
     required this.onTap,
   });
 
   @override
-  State<_SummaryCard> createState() => _SummaryCardState();
-}
-
-class _SummaryCardState extends State<_SummaryCard> {
-  bool _pressed = false;
-
-  @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
+    final colorScheme = Theme.of(context).colorScheme;
 
-    return AnimatedScale(
-      scale: _pressed ? 0.96 : 1.0,
-      duration: const Duration(milliseconds: 120),
-      curve: Curves.easeOutCubic,
-      child: Material(
-        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(20),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(20),
-          onTapDown: (_) => setState(() => _pressed = true),
-          onTapUp: (_) => setState(() => _pressed = false),
-          onTapCancel: () => setState(() => _pressed = false),
-          onTap: widget.onTap,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: widget.iconColor.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(
-                        widget.icon,
-                        color: widget.iconColor,
-                        size: 20,
-                      ),
-                    ),
-                    CircularPercentIndicator(
-                      radius: 16.0,
-                      lineWidth: 3.5,
-                      percent: widget.percent,
-                      progressColor: widget.progressColor,
-                      backgroundColor: colorScheme.outlineVariant.withValues(alpha: 0.3),
-                      circularStrokeCap: CircularStrokeCap.round,
-                    ),
-                  ],
+    return Material(
+      color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: iconColor.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                const SizedBox(height: 14),
-                Text(
-                  widget.primaryValue,
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: -0.5,
-                  ),
+                child: Icon(
+                  icon,
+                  color: iconColor,
+                  size: 20,
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  widget.title,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: colorScheme.onSurface,
-                  ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                primaryValue,
+                style: const TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: -0.5,
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  widget.secondaryValue,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: colorScheme.onSurfaceVariant,
-                  ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: colorScheme.onSurface,
                 ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                secondaryValue,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
           ),
         ),
       ),
