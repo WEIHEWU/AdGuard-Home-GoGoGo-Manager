@@ -21,22 +21,18 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.11
-          name: "AdGuard Home Manager v2.24.11"
+          tag_name: v2.24.12
+          name: "AdGuard Home Manager v2.24.12"
           body: |
-            ### AdGuard Home Manager `v2.24.11`
+            ### AdGuard Home Manager `v2.24.12`
 
             专为 **[AdGuard Home For Android](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu)** 定制的轻量级配套管理器客户端。
 
-            #### 🆕 v2.24.11 更新亮点
-            - **极致精简与安装包瘦身（20 MB → 8.2 MB）**：
-              - 移除冗余统计图表（`fl_chart`）、动态壁纸取色（`dynamic_color`）、外链启动器（`url_launcher`）及 35+ 个非核心页面与桌面端抽屉组件；
-              - 底部导航去除过渡动画实现 0ms 瞬时切换，首页仅保留核心保护总开关、误杀排错（含网页排错/规则检索/应用抓包）、分应用开关、网络刷新及 2×2 核心指标卡片。
-            - **过滤器（Filters）标签页切换丝滑零掉帧**：
-              - 自定义规则与白名单解析移交后台 `Isolate` 预计算（`PrecomputedCustomRules`），结合 `SliverFixedExtentList` 与分批增量渲染，彻底消除包含数千条规则时的切换卡顿。
-            - **内存环形缓冲区（RingBuffer）轻量日志**：
-              - 仅在打开日志页面时按需读取内存中最近 200 条记录，支持「全部 / 已拦截 / 已放行」筛选、一键清空与一键加白/拉黑。
-            - **隐私与去广告规则库升级（测试得分 99%）**：
-              - 内置增强版防追踪、A/B 测试、错误监控、邮件追踪、联盟网络、社交追踪及视频广告拦截规则库。
+            #### 🆕 v2.24.12 更新亮点
+            - **全面支持局域网明文 HTTP 与私有 IP 访问**：
+              - AndroidManifest 及网络安全策略配置开启全端口 `usesCleartextTraffic`，支持直接访问各类局域网服务；
+              - 误杀排错与域名提取增加私有 IP（`10.x`, `172.16-31.x`, `192.168.x`, `127.x`）智能识别，避免纯 IP 及非标端口（如 `:9978`）被错误升级为 HTTPS。
+            - **保持极致精简与秒开体验（仅 8.2 MB）**：
+              - 纯轻量化架构，零卡顿切换与纯内存 RingBuffer 实时日志。
           files: |
             releases/AdGuardHomeManager.apk
