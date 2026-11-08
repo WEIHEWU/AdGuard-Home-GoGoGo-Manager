@@ -971,13 +971,19 @@ sh /data/adb/agh/scripts/iptables.sh --apply-allowlist >/dev/null 2>&1 &
       trimmed = urlMatch.group(0)!;
     } else if (!trimmed.startsWith('http://') &&
         !trimmed.startsWith('https://')) {
-      trimmed = 'https://$trimmed';
+      final hostPart = trimmed.split('/').first.split(':').first.toLowerCase();
+      final scheme = _isPrivateOrLoopbackHost(hostPart) ? 'http' : 'https';
+      trimmed = '$scheme://$trimmed';
     }
 
     final uri = Uri.tryParse(trimmed);
     if (uri == null || uri.host.isEmpty) return [];
 
-    final Set<String> domains = {uri.host.toLowerCase()};
+    final hostLower = uri.host.toLowerCase();
+    final Set<String> domains = {};
+    if (!_isIpLiteral(hostLower) && !_isPrivateOrLoopbackHost(hostLower)) {
+      domains.add(hostLower);
+    }
 
     Future<String> fetchHtml(String targetUrl) async {
       try {
@@ -1011,7 +1017,11 @@ sh /data/adb/agh/scripts/iptables.sh --apply-allowlist >/dev/null 2>&1 &
       }
     }
 
-    final mainHtml = await fetchHtml(uri.toString());
+    var mainHtml = await fetchHtml(uri.toString());
+    if (mainHtml.isEmpty && uri.scheme == 'https') {
+      final httpFallback = uri.replace(scheme: 'http').toString();
+      mainHtml = await fetchHtml(httpFallback);
+    }
     final StringBuffer allHtml = StringBuffer(mainHtml);
 
     // 针对蓝奏云等使用同源 iframe 嵌套下载页的站点，自动跟进 1 层同源 iframe
@@ -1022,7 +1032,7 @@ sh /data/adb/agh/scripts/iptables.sh --apply-allowlist >/dev/null 2>&1 &
       for (final m in iframeRegex.allMatches(mainHtml)) {
         final relPath = m.group(1);
         if (relPath != null && relPath.startsWith('/') && !relPath.startsWith('//')) {
-          final subUrl = '${uri.scheme}://${uri.host}$relPath';
+          final subUrl = '${uri.scheme}://${uri.authority}$relPath';
           final subHtml = await fetchHtml(subUrl);
           if (subHtml.isNotEmpty) {
             allHtml.write('\n');
@@ -1102,9 +1112,46 @@ monkey -p $safePkg -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
     }
   }
 
+  static bool _isIpLiteral(String host) {
+    final clean = host.replaceAll('[', '').replaceAll(']', '');
+    return InternetAddress.tryParse(clean) != null;
+  }
+
+  static bool _isPrivateOrLoopbackHost(String host) {
+    final h = host.toLowerCase().replaceAll('[', '').replaceAll(']', '');
+    if (h == 'localhost' ||
+        h.endsWith('.local') ||
+        h.endsWith('.lan') ||
+        h.endsWith('.home.arpa') ||
+        h.endsWith('.in-addr.arpa') ||
+        h.endsWith('.ip6.arpa')) {
+      return true;
+    }
+    final ip = InternetAddress.tryParse(h);
+    if (ip == null) return false;
+    if (ip.isLoopback || ip.isLinkLocal || ip.isMulticast) return true;
+    final raw = ip.rawAddress;
+    if (raw.length == 4) {
+      final b0 = raw[0];
+      final b1 = raw[1];
+      // 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16
+      if (b0 == 127 || b0 == 10) return true;
+      if (b0 == 172 && b1 >= 16 && b1 <= 31) return true;
+      if (b0 == 192 && b1 == 168) return true;
+      if (b0 == 169 && b1 == 254) return true;
+    } else if (raw.length == 16) {
+      // fc00::/7 (Unique Local) or fe80::/10 (Link-Local)
+      if ((raw[0] & 0xfe) == 0xfc || (raw[0] == 0xfe && (raw[1] & 0xc0) == 0x80)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   static bool _isValidCandidateDomain(String host) {
     if (host.isEmpty || host.length > 120 || !host.contains('.')) return false;
     if (host.startsWith('.') || host.endsWith('.')) return false;
+    if (_isIpLiteral(host) || _isPrivateOrLoopbackHost(host)) return false;
     const ignoredHosts = {
       'schemas.android.com',
       'www.w3.org',
