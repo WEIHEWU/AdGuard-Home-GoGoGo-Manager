@@ -292,7 +292,7 @@ echo "ALLOW=\$allow_cnt"
         'su',
         [
           '-c',
-          'if pidof -x /data/adb/agh/scripts/iptables.sh >/dev/null 2>&1; then sh /data/adb/agh/scripts/iptables.sh --reload >/dev/null 2>&1; else sh /data/adb/agh/scripts/iptables.sh >/dev/null 2>&1 & fi'
+          'if grep -q -- "--reload" /data/adb/agh/scripts/iptables.sh 2>/dev/null; then if pidof -x /data/adb/agh/scripts/iptables.sh >/dev/null 2>&1; then sh /data/adb/agh/scripts/iptables.sh --reload >/dev/null 2>&1; else sh /data/adb/agh/scripts/iptables.sh >/dev/null 2>&1 & fi; else rm -f /data/adb/agh/scripts/running.lock; pkill -f "/data/adb/agh/scripts/iptables.sh" 2>/dev/null; sh /data/adb/modules/AdGuardHome/service.sh >/dev/null 2>&1 & fi'
         ],
       );
       _cachedDiag = null;
@@ -323,7 +323,7 @@ echo "ALLOW=\$allow_cnt"
         'su',
         [
           '-c',
-          'rm -f /data/adb/agh/last_clean_time && rmdir /data/adb/agh/cache_clean.lock 2>/dev/null; sh /data/adb/agh/scripts/NoAdsService.sh >/dev/null 2>&1'
+          'rm -f /data/adb/agh/last_clean_time && rmdir /data/adb/agh/cache_clean.lock 2>/dev/null; if grep -q -- "--daemon" /data/adb/agh/scripts/NoAdsService.sh 2>/dev/null; then sh /data/adb/agh/scripts/NoAdsService.sh --once >/dev/null 2>&1; else sh /data/adb/agh/scripts/NoAdsService.sh >/dev/null 2>&1 & fi'
         ],
       );
       return result.exitCode == 0;
@@ -879,6 +879,7 @@ sh /data/adb/agh/scripts/iptables.sh --apply-allowlist >/dev/null 2>&1 &
   static String resolveFilterFileName(String pathOrFile) {
     final fileName = pathOrFile.split('/').last.trim();
     const map = {
+      '1721861844.txt': 'AdGuard DNS 规则',
       '1721861846.txt': 'GOODBYEADS 规则',
       '1740000001.txt': 'AWAvenue 秋风规则',
       '1.txt': 'AdGuard DNS 规则',
