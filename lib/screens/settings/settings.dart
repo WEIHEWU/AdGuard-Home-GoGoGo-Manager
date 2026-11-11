@@ -548,7 +548,7 @@ class _SettingsWidgetState extends State<Settings> {
             padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
             child: Center(
               child: Text(
-                'AdGuard Home Manager v${AppConfigProvider.appVersion}',
+                'AdGuard Home GoGoGo v${AppConfigProvider.appVersion}',
                 style: TextStyle(
                   fontSize: 12,
                   color: Theme.of(context)

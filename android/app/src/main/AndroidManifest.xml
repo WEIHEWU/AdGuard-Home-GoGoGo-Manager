@@ -18,7 +18,7 @@
         tools:ignore="ProtectedPermissions" />
 
     <application
-        android:label="AdGuard Home Manager"
+        android:label="@string/app_name"
         android:name="${applicationName}"
         android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true"

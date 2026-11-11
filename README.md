@@ -1,10 +1,12 @@
-# AdGuard-Home-gogogo Manager
+# AdGuard-Home-GoGoGo Manager
 
-**[📥 点击直接下载安装包 (AdGuardHomeManager.apk)](https://github.com/WEIHEWU/AdGuard-Home-Manager-wu/raw/main/releases/AdGuardHomeManager.apk)** · [Releases 页面](https://github.com/WEIHEWU/AdGuard-Home-Manager-wu/releases) · [配套 Root 模块仓库 (AdGuard-Home-gogogo)](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu)
+> **AdGuard-Home-GoGoGo Manager - 专为 AdGuard-Home-GoGoGo 打造的轻量现代化 Android 控制面板**
 
-基于 Flutter 开发的 **AdGuard-Home-gogogo Manager**（包名：`com.wu.adgogogo`），专为 [AdGuard-Home-gogogo](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu) 全设备级去广告模块深度定制。
+**[📥 点击直接下载安装包 (AdGuardHomeManager.apk)](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager/raw/main/releases/AdGuardHomeManager.apk)** · [Releases 页面](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager/releases) · [配套 Root 模块仓库 (AdGuard-Home-GoGoGo)](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo)
 
-当前版本：`2.24.14`（`versionCode 180`，arm64-v8a 超轻量化体积仅 `8.2 MB`）。
+基于 Flutter 开发的 **AdGuard-Home-GoGoGo Manager**（应用桌面名称：`AdGuard Home GoGoGo`，快捷磁贴名称：`AGH GoGoGo`，包名：`com.wu.adgogogo`），专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 全设备级去广告模块深度定制。
+
+当前版本：`2.24.15`（`versionCode 181`，arm64-v8a 超轻量化体积仅 `8.2 MB`）。
 
 ---
 
@@ -21,9 +23,9 @@
    - **网页链接域名嗅探器**：支持粘贴网页链接或分享口令，自动抓取网页源码及同源 `iframe` 中引用的所有主域名与静态资源/CDN 域名（智能过滤局域网私有 IP）；
    - **应用本地缓存域名扫描 + 冷启动抓包复现**：支持扫描目标应用私有目录缓存的接口域名，或一键清理 DNS 缓存并冷启动目标应用进行实时抓包排查；
    - **本地规则库关键词检索**：支持直接在 `/data/adb/agh/bin/data/filters/*.txt` 数十万条规则中按关键词检索并一键放行。
-4. **免登录零配置直连 & 状态栏快捷磁贴**：
+4. **免登录零配置直连 & 状态栏快捷磁贴 (`AGH GoGoGo`)**：
    - 彻底移除原版繁琐的多服务器数据库（`sqflite`）、首次引导向导与冗余图表组件，启动时通过 Root 自动读取 `/data/adb/agh/bin/AdGuardHome.yaml` 中的动态管理端口并秒级直连本地实例；
-   - 支持系统下拉通知栏「AdGuard Home」快捷开关磁贴，开机或模块换端口后自动重绑。
+   - 支持系统下拉通知栏「`AGH GoGoGo`」快捷开关磁贴，开机或模块换端口后自动重绑。
 5. **合一化 DNS 设置与模块运维工具箱**：
    - 单页整合 Upstream / Bootstrap / Fallback DNS、查询模式（负载均衡 / 并行请求 / 最快 IP）、乐观缓存、强力模式（SNI 阻断）及上游连通性测速；
    - 内置模块运行状态自检与 `agh.log` 日志查看器、一键刷新网络与防火墙规则、一键清理应用开屏广告缓存、以及一键智能补全/重置出厂默认自定义规则。

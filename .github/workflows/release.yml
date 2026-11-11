@@ -21,16 +21,17 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.14
-          name: "AdGuard-Home-gogogo Manager v2.24.14"
+          tag_name: v2.24.15
+          name: "AdGuard-Home-GoGoGo Manager v2.24.15"
           body: |
-            ### AdGuard-Home-gogogo Manager `v2.24.14`
+            ### AdGuard-Home-GoGoGo Manager `v2.24.15`
 
-            专为 **[AdGuard-Home-gogogo](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu)** 定制的轻量级配套管理器客户端（包名：`com.wu.adgogogo`）。
+            **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            #### 🆕 v2.24.14 更新亮点
-            - **新增「🌐 海外模式 (Overseas) / 🇨🇳 国内模式 (CN)」双模一键热切换**：
-              - 首页顶部快捷卡片与 DNS 设置页均内置双模分段切换开关（默认激活海外模式）；
-              - 一键无损切换上游加密 DNS、订阅规则源与 VPN 接管策略，100% 保留个人自定义规则与动态端口，无需重启手机即时生效。
+            #### 🆕 v2.24.15 更新亮点
+            - **品牌规范统一**：
+              - 应用桌面名称更新为 `AdGuard Home GoGoGo`，通知栏快捷磁贴名称更新为 `AGH GoGoGo`，仓库地址更新为 `WEIHEWU/AdGuard-Home-GoGoGo-Manager`；
+            - **内置「🌐 海外模式 (Overseas) / 🇨🇳 国内模式 (CN)」双模一键热切换**：
+              - 首页顶部快捷卡片与 DNS 设置页均内置双模分段切换开关（默认激活海外模式），一键无损切换上游加密 DNS、订阅规则源与 VPN 接管策略，100% 保留个人自定义规则与动态端口。
           files: |
             releases/AdGuardHomeManager.apk

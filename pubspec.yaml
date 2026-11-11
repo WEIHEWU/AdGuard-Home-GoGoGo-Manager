@@ -1,7 +1,7 @@
 name: adguard_home_manager
-description: AdGuard-Home-gogogo Manager
-homepage: https://github.com/WEIHEWU/AdGuard-Home-Manager-wu
-repository: https://github.com/WEIHEWU/AdGuard-Home-Manager-wu
+description: AdGuard-Home-GoGoGo Manager - 专为 AdGuard-Home-GoGoGo 打造的轻量现代化 Android 控制面板
+homepage: https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager
+repository: https://github.com/WEIHEWU/AdGuard-Home-GoGoGo-Manager
 
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
@@ -21,7 +21,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # of the product and file versions while build-number is used as the build suffix.
 # 正式版本号以 git tag 为准（当前 v2.24.0）；内部版本名跟随预发布 tag（2.24.1）。
 # +build 必须单调递增（当前 162），即使版本名回退也不能减小，否则无法覆盖安装。
-version: 2.24.14+180
+version: 2.24.15+181
 
 environment:
   sdk: '>=3.4.0 <4.0.0'

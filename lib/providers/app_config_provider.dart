@@ -10,7 +10,7 @@ class AppConfigProvider with ChangeNotifier {
   AppConfigProvider({required this.sharedPreferencesInstance});
 
   static const String appVersion =
-      String.fromEnvironment('FLUTTER_BUILD_NAME', defaultValue: '2.24.11');
+      String.fromEnvironment('FLUTTER_BUILD_NAME', defaultValue: '2.24.15');
 
   int _selectedScreen = 0;
   bool _showingSnackbar = false;
