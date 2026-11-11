@@ -10,13 +10,15 @@ import 'package:adguard_home_manager/functions/get_filtered_status.dart';
 import 'package:adguard_home_manager/functions/snackbar.dart';
 import 'package:adguard_home_manager/models/logs.dart';
 import 'package:adguard_home_manager/providers/app_config_provider.dart';
+import 'package:adguard_home_manager/providers/dns_provider.dart';
+import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
 import 'package:adguard_home_manager/screens/settings/module/app_allowlist_modal.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
 
 /// 极简内嵌式模块快捷操作区（内嵌于首页顶部保护主卡片中）：
-/// - 常态下仅展示一行 3 个高频操作按钮（误杀排错、分应用开关、网络刷新），零视觉噪音；
+/// - 常态下展示国内/海外双模无缝切换器与一行 3 个高频操作按钮（误杀排错、分应用开关、网络刷新）；
 /// - 仅当检测到核心未运行或 DNS/SNI 转发异常时，才在按钮上方显示一行异常修复提示。
 class ModuleQuickActions extends StatefulWidget {
   const ModuleQuickActions({super.key});
@@ -28,10 +30,12 @@ class ModuleQuickActions extends StatefulWidget {
 class _ModuleQuickActionsState extends State<ModuleQuickActions> {
   bool _loadingDiag = true;
   bool _flushing = false;
+  bool _switchingMode = false;
   Map<String, dynamic> _diag = {
     'running': true,
     'natOk': true,
     'sniOk': true,
+    'runMode': 'overseas',
   };
 
   @override
@@ -48,6 +52,43 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
       _diag = diag;
       _loadingDiag = false;
     });
+  }
+
+  Future<void> _handleSwitchMode(String targetMode) async {
+    final currentMode = (_diag['runMode'] ?? 'overseas').toString();
+    if (_switchingMode || targetMode == currentMode) return;
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _switchingMode = true;
+      _diag['runMode'] = targetMode;
+    });
+
+    final statusProvider = Provider.of<StatusProvider>(context, listen: false);
+    final dnsProvider = Provider.of<DnsProvider>(context, listen: false);
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
+    final appConfigProvider =
+        Provider.of<AppConfigProvider>(context, listen: false);
+    final service = ModuleConfigService();
+
+    final ok = await service.switchRunMode(targetMode);
+    await Future.delayed(const Duration(milliseconds: 600));
+    await Future.wait([
+      _loadDiagnostics(forceRefresh: true),
+      statusProvider.getServerStatus(withLoadingIndicator: false),
+      dnsProvider.fetchDnsData(showLoading: false),
+      filteringProvider.fetchFilters(showLoading: false),
+    ]);
+
+    if (!mounted) return;
+    setState(() => _switchingMode = false);
+    final modeLabel =
+        targetMode == 'cn' ? '🇨🇳 国内模式 (CN)' : '🌐 海外模式 (Overseas)';
+    showSnackbar(
+      appConfigProvider: appConfigProvider,
+      label: ok ? '已成功切换至 $modeLabel' : '模式切换失败，请检查 Root 权限',
+      color: ok ? Colors.green : Colors.red,
+    );
   }
 
   Future<void> _handleQuickFlush() async {
@@ -177,6 +218,12 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
           ),
         ],
         const SizedBox(height: 12),
+        _ModeSegmentedBar(
+          currentMode: (_diag['runMode'] ?? 'overseas').toString(),
+          switching: _switchingMode,
+          onSelectMode: _handleSwitchMode,
+        ),
+        const SizedBox(height: 8),
         Row(
           children: [
             Expanded(
@@ -207,6 +254,100 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
           ],
         ),
       ],
+    );
+  }
+}
+
+class _ModeSegmentedBar extends StatelessWidget {
+  final String currentMode;
+  final bool switching;
+  final ValueChanged<String> onSelectMode;
+
+  const _ModeSegmentedBar({
+    required this.currentMode,
+    required this.switching,
+    required this.onSelectMode,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final isOverseas = currentMode != 'cn';
+
+    Widget buildTab({
+      required String mode,
+      required String label,
+      required bool selected,
+    }) {
+      return Expanded(
+        child: Material(
+          color: selected
+              ? colorScheme.primaryContainer.withValues(alpha: 0.9)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: switching ? null : () => onSelectMode(mode),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (switching && selected) ...[
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.8,
+                        color: colorScheme.onPrimaryContainer,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight:
+                            selected ? FontWeight.w700 : FontWeight.w500,
+                        color: selected
+                            ? colorScheme.onPrimaryContainer
+                            : colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          buildTab(
+            mode: 'overseas',
+            label: '🌐 海外模式 (Overseas)',
+            selected: isOverseas,
+          ),
+          const SizedBox(width: 4),
+          buildTab(
+            mode: 'cn',
+            label: '🇨🇳 国内模式 (CN)',
+            selected: !isOverseas,
+          ),
+        ],
+      ),
     );
   }
 }

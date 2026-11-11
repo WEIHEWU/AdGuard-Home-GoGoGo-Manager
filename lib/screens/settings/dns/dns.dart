@@ -16,7 +16,9 @@ import 'package:adguard_home_manager/functions/clear_dns_cache.dart';
 import 'package:adguard_home_manager/functions/snackbar.dart';
 import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/providers/dns_provider.dart';
+import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
+import 'package:adguard_home_manager/services/module_config_service.dart';
 
 class DnsSettings extends StatefulWidget {
   final bool splitView;
@@ -42,6 +44,8 @@ class _DnsSettingsState extends State<DnsSettings> {
   bool _enableDnssec = false;
   bool _enableEdns = false;
   bool _userModified = false;
+  String _runMode = 'overseas';
+  bool _switchingRunMode = false;
 
   @override
   void initState() {
@@ -51,6 +55,50 @@ class _DnsSettingsState extends State<DnsSettings> {
       _applyInfo(dnsProvider.dnsInfo!);
     }
     _loadData();
+    _loadRunMode();
+  }
+
+  Future<void> _loadRunMode() async {
+    final mode = await ModuleConfigService().readRunMode();
+    if (!mounted) return;
+    setState(() => _runMode = mode);
+  }
+
+  Future<void> _handleSwitchRunMode(String targetMode) async {
+    if (_switchingRunMode || targetMode == _runMode) return;
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _switchingRunMode = true;
+      _runMode = targetMode;
+    });
+
+    final dnsProvider = Provider.of<DnsProvider>(context, listen: false);
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
+    final appConfigProvider =
+        Provider.of<AppConfigProvider>(context, listen: false);
+
+    final ok = await ModuleConfigService().switchRunMode(targetMode);
+    await Future.delayed(const Duration(milliseconds: 600));
+    final fetched = await dnsProvider.fetchDnsData(showLoading: false);
+    await filteringProvider.fetchFilters(showLoading: false);
+
+    if (!mounted) return;
+    setState(() {
+      _switchingRunMode = false;
+      _userModified = false;
+      if (fetched && dnsProvider.dnsInfo != null) {
+        _applyInfo(dnsProvider.dnsInfo!);
+      }
+    });
+
+    final modeLabel =
+        targetMode == 'cn' ? '🇨🇳 国内模式 (CN)' : '🌐 海外模式 (Overseas)';
+    showSnackbar(
+      appConfigProvider: appConfigProvider,
+      label: ok ? '已成功切换至 $modeLabel' : '模式切换失败，请检查 Root 权限',
+      color: ok ? Colors.green : Colors.red,
+    );
   }
 
   @override
@@ -264,6 +312,39 @@ class _DnsSettingsState extends State<DnsSettings> {
                 return ListView(
                   padding: const EdgeInsets.only(bottom: 28),
                   children: [
+                    SectionLabel(
+                      label: isZh
+                          ? '模块运行模式热切换（默认海外模式）'
+                          : 'Module Run Mode (Default: Overseas)',
+                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: SegmentedButton<String>(
+                        segments: [
+                          ButtonSegment<String>(
+                            value: 'overseas',
+                            label: Text(
+                              isZh
+                                  ? '🌐 海外模式 (Overseas)'
+                                  : '🌐 Overseas Mode',
+                              style: const TextStyle(fontSize: 12.5),
+                            ),
+                          ),
+                          ButtonSegment<String>(
+                            value: 'cn',
+                            label: Text(
+                              isZh ? '🇨🇳 国内模式 (CN)' : '🇨🇳 China Mode (CN)',
+                              style: const TextStyle(fontSize: 12.5),
+                            ),
+                          ),
+                        ],
+                        selected: {_runMode == 'cn' ? 'cn' : 'overseas'},
+                        onSelectionChanged: _switchingRunMode
+                            ? null
+                            : (v) => _handleSwitchRunMode(v.first),
+                      ),
+                    ),
                     SectionLabel(
                       label: isZh
                           ? '一键加密 DNS 预设（国内外通用）'

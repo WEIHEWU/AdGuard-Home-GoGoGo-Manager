@@ -21,18 +21,16 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.13
-          name: "AdGuard-Home-gogogo Manager v2.24.13"
+          tag_name: v2.24.14
+          name: "AdGuard-Home-gogogo Manager v2.24.14"
           body: |
-            ### AdGuard-Home-gogogo Manager `v2.24.13`
+            ### AdGuard-Home-gogogo Manager `v2.24.14`
 
             专为 **[AdGuard-Home-gogogo](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu)** 定制的轻量级配套管理器客户端（包名：`com.wu.adgogogo`）。
 
-            #### 🆕 v2.24.12 更新亮点
-            - **全面支持局域网明文 HTTP 与私有 IP 访问**：
-              - AndroidManifest 及网络安全策略配置开启全端口 `usesCleartextTraffic`，支持直接访问各类局域网服务；
-              - 误杀排错与域名提取增加私有 IP（`10.x`, `172.16-31.x`, `192.168.x`, `127.x`）智能识别，避免纯 IP 及非标端口（如 `:9978`）被错误升级为 HTTPS。
-            - **保持极致精简与秒开体验（仅 8.2 MB）**：
-              - 纯轻量化架构，零卡顿切换与纯内存 RingBuffer 实时日志。
+            #### 🆕 v2.24.14 更新亮点
+            - **新增「🌐 海外模式 (Overseas) / 🇨🇳 国内模式 (CN)」双模一键热切换**：
+              - 首页顶部快捷卡片与 DNS 设置页均内置双模分段切换开关（默认激活海外模式）；
+              - 一键无损切换上游加密 DNS、订阅规则源与 VPN 接管策略，100% 保留个人自定义规则与动态端口，无需重启手机即时生效。
           files: |
             releases/AdGuardHomeManager.apk

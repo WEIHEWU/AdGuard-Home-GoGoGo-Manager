@@ -166,6 +166,7 @@ class ModuleConfigService {
         'vpnMode': 'off',
         'rssMb': '',
         'allowlistCount': 0,
+        'runMode': 'overseas',
       };
     }
     if (!forceRefresh &&
@@ -179,6 +180,7 @@ class ModuleConfigService {
       const cmd = '''
 pid=\$(pidof AdGuardHome 2>/dev/null | awk '{print \$1}')
 dns_port=\$(sed -n 's/^redir_port=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | head -n 1)
+run_mode=\$(sed -n 's/^RUN_MODE=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | head -n 1)
 iptables -w 2 -t nat -C OUTPUT -j ADGUARD >/dev/null 2>&1 && nat_ok=1 || nat_ok=0
 iptables -w 2 -t filter -C OUTPUT -j AGH_SNI >/dev/null 2>&1 && sni_ok=1 || sni_ok=0
 vpn_mode=\$(cat /data/adb/agh/vpn_mode_status 2>/dev/null | head -n 1)
@@ -188,6 +190,7 @@ allow_cnt=0
 [ -s /data/adb/agh/app-allow.txt ] && allow_cnt=\$(grep -cvE '^[[:space:]]*(#|\$)' /data/adb/agh/app-allow.txt 2>/dev/null || echo 0)
 echo "PID=\$pid"
 echo "PORT=\$dns_port"
+echo "MODE=\$run_mode"
 echo "NAT=\$nat_ok"
 echo "SNI=\$sni_ok"
 echo "VPN=\$vpn_mode"
@@ -205,10 +208,12 @@ echo "ALLOW=\$allow_cnt"
           'vpnMode': 'off',
           'rssMb': '',
           'allowlistCount': 0,
+          'runMode': 'overseas',
         };
       }
       String pid = '';
       String dnsPort = '';
+      String runMode = 'overseas';
       bool natOk = false;
       bool sniOk = false;
       String vpnMode = 'off';
@@ -218,6 +223,10 @@ echo "ALLOW=\$allow_cnt"
         final t = line.trim();
         if (t.startsWith('PID=')) pid = t.substring(4).trim();
         if (t.startsWith('PORT=')) dnsPort = t.substring(5).trim();
+        if (t.startsWith('MODE=')) {
+          final m = t.substring(5).trim().toLowerCase();
+          runMode = (m == 'cn') ? 'cn' : 'overseas';
+        }
         if (t.startsWith('NAT=')) natOk = t.substring(4).trim() == '1';
         if (t.startsWith('SNI=')) sniOk = t.substring(4).trim() == '1';
         if (t.startsWith('VPN=')) vpnMode = t.substring(4).trim();
@@ -240,6 +249,7 @@ echo "ALLOW=\$allow_cnt"
         'vpnMode': vpnMode.isEmpty ? 'off' : vpnMode,
         'rssMb': rssMb,
         'allowlistCount': allowlistCount,
+        'runMode': runMode,
       };
       _cachedDiag = diag;
       _cachedDiagTime = DateTime.now();
@@ -254,7 +264,42 @@ echo "ALLOW=\$allow_cnt"
         'vpnMode': 'off',
         'rssMb': '',
         'allowlistCount': 0,
+        'runMode': 'overseas',
       };
+    }
+  }
+
+  Future<String> readRunMode() async {
+    if (!_isAndroid) return 'overseas';
+    try {
+      final result = await Process.run(
+        'su',
+        ['-c', "sed -n 's/^RUN_MODE=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | head -n 1"],
+      );
+      if (result.exitCode != 0) return 'overseas';
+      final mode = result.stdout.toString().trim().toLowerCase();
+      return mode == 'cn' ? 'cn' : 'overseas';
+    } catch (_) {
+      return 'overseas';
+    }
+  }
+
+  Future<bool> switchRunMode(String targetMode) async {
+    if (!_isAndroid) return false;
+    final normalized = targetMode.trim().toLowerCase() == 'cn' ? 'cn' : 'overseas';
+    try {
+      final result = await Process.run(
+        'su',
+        [
+          '-c',
+          'sh /data/adb/agh/scripts/switch_mode.sh $normalized >/dev/null 2>&1'
+        ],
+      );
+      _cachedDiag = null;
+      _cachedDiagTime = null;
+      return result.exitCode == 0;
+    } catch (_) {
+      return false;
     }
   }
 

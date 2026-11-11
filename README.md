@@ -4,7 +4,7 @@
 
 基于 Flutter 开发的 **AdGuard-Home-gogogo Manager**（包名：`com.wu.adgogogo`），专为 [AdGuard-Home-gogogo](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu) 本地去广告模块深度定制。
 
-当前版本：`2.24.13`（`versionCode 179`）。
+当前版本：`2.24.14`（`versionCode 180`）。
 
 ---
 
