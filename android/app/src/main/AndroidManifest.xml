@@ -1,7 +1,7 @@
 <manifest 
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
-    package="com.liuzq2002.adguard_home_manager">
+    package="com.wu.adgogogo">
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Required on Android 17+ (API 37) to reach AdGuard Home instances on
          the local network under Local Network Protection. -->

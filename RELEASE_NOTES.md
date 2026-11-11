@@ -72,6 +72,6 @@ AdGuard Home Manager (Mod) 是基于 JGeek00/adguard-home-manager 修改的 AdGu
 ## 许可证与合规
 
 本项目遵循 Apache License 2.0，基于 JGeek00/adguard-home-manager 修改而来。
-原始版权归 JGeek00 所有，修改版权归 liuzq2002，详见仓库 LICENSE.md 与 NOTICE。
+原始版权归 JGeek00 所有，修改版权归 wu，详见仓库 LICENSE.md 与 NOTICE。
 
 本项目为**非官方**客户端，与 AdGuard 官方、AdGuard Home 团队以及原始项目无任何关联。

@@ -1,18 +1,18 @@
-AdGuard Home Manager (Mod)
-=========================
+AdGuard-Home-gogogo Manager
+===========================
 
 Copyright 2022 JGeek00
   https://github.com/JGeek00/adguard-home-manager
 
-Modifications Copyright 2026 liuzq2002
-  https://github.com/liuzq2002/adguard-home-manager-mod
+Modifications Copyright 2026 wu
+  https://github.com/WEIHEWU/AdGuard-Home-Manager-wu
 
 This project is a modified fork of JGeek00/adguard-home-manager and is
 distributed under the Apache License, Version 2.0. See LICENSE.md for the
 full license text.
 
 Main modifications:
-  - Renamed Android application package to com.liuzq2002.adguard_home_manager.
+  - Renamed Android application package to com.wu.adgogogo.
   - Removed onboarding, clients page, home floating action button, home
     server-status card, and several settings entries (safe search, access,
     DHCP, encryption, server info, servers, general, advanced, updates).

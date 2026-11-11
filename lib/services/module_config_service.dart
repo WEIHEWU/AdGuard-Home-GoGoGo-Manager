@@ -7,7 +7,7 @@ class ModuleConfigService {
   static const String moduleConfigPath = '/data/adb/agh/scripts/config.prop';
   static const String moduleYamlPath = '/data/adb/agh/bin/AdGuardHome.yaml';
   static const MethodChannel _installedAppsChannel =
-      MethodChannel('com.jgeek00.adguard_home_manager/installed_apps');
+      MethodChannel('com.wu.adgogogo/installed_apps');
 
   static Map<String, dynamic>? _cachedDiag;
   static DateTime? _cachedDiagTime;

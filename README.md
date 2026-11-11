@@ -1,10 +1,10 @@
-# AdGuard Home Manager
+# AdGuard-Home-gogogo Manager
 
-**[📥 点击直接下载安装包 (AdGuardHomeManager.apk)](https://github.com/WEIHEWU/AdGuard-Home-Manager-wu/raw/main/releases/AdGuardHomeManager.apk)** · [Releases 页面](https://github.com/WEIHEWU/AdGuard-Home-Manager-wu/releases) · [配套 Root 模块仓库 (AdGuard-Home-For-Android)](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu)
+**[📥 点击直接下载安装包 (AdGuardHomeManager.apk)](https://github.com/WEIHEWU/AdGuard-Home-Manager-wu/raw/main/releases/AdGuardHomeManager.apk)** · [Releases 页面](https://github.com/WEIHEWU/AdGuard-Home-Manager-wu/releases) · [配套 Root 模块仓库 (AdGuard-Home-gogogo)](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu)
 
-基于 Flutter 开发的 **AdGuard Home Manager**，专为 [AdGuard Home For Android](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu) 本地去广告模块深度定制。
+基于 Flutter 开发的 **AdGuard-Home-gogogo Manager**（包名：`com.wu.adgogogo`），专为 [AdGuard-Home-gogogo](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu) 本地去广告模块深度定制。
 
-当前版本：`2.24.6`（`versionCode 171`，已同步跟进上游 `JGeek00/adguard-home-manager` `v2.22.2` 最新更新）。
+当前版本：`2.24.13`（`versionCode 179`）。
 
 ---
 
@@ -48,6 +48,5 @@ flutter build apk --release --target-platform android-arm64
 ## 致谢与开源许可
 
 - 上游原版项目：[JGeek00/adguard-home-manager](https://github.com/JGeek00/adguard-home-manager)
-- 模块适配分支参考：[liuzq2002/adguard-home-manager-mod](https://github.com/liuzq2002/adguard-home-manager-mod)
-- 修改与维护：春梦无痕
+- 修改与维护：[wu](https://github.com/WEIHEWU)
 - 开源协议：GNU General Public License v3.0 (GPL-3.0)，详见 [LICENSE.md](LICENSE.md)。

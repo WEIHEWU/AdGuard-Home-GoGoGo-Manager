@@ -21,12 +21,12 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.12
-          name: "AdGuard Home Manager v2.24.12"
+          tag_name: v2.24.13
+          name: "AdGuard-Home-gogogo Manager v2.24.13"
           body: |
-            ### AdGuard Home Manager `v2.24.12`
+            ### AdGuard-Home-gogogo Manager `v2.24.13`
 
-            专为 **[AdGuard Home For Android](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu)** 定制的轻量级配套管理器客户端。
+            专为 **[AdGuard-Home-gogogo](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu)** 定制的轻量级配套管理器客户端（包名：`com.wu.adgogogo`）。
 
             #### 🆕 v2.24.12 更新亮点
             - **全面支持局域网明文 HTTP 与私有 IP 访问**：

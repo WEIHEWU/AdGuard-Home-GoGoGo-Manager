@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 /// Bridge to Android's per-app language preference, a no-op elsewhere.
 class PlatformLocaleService {
   static const MethodChannel _channel = MethodChannel(
-    'com.jgeek00.adguard_home_manager/locale'
+    'com.wu.adgogogo/locale'
   );
 
   static bool get _isSupported => Platform.isAndroid;

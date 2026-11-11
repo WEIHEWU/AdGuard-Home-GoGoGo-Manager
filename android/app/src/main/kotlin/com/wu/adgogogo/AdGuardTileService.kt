@@ -1,4 +1,4 @@
-package com.liuzq2002.adguard_home_manager
+package com.wu.adgogogo
 
 import android.content.Context
 import android.content.SharedPreferences

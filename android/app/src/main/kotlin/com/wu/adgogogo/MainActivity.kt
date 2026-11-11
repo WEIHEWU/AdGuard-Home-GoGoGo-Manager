@@ -1,4 +1,4 @@
-package com.liuzq2002.adguard_home_manager
+package com.wu.adgogogo
 
 import android.app.LocaleManager
 import android.content.ComponentName
@@ -18,9 +18,9 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 
 class MainActivity: FlutterActivity() {
-    private val channelName = "com.jgeek00.adguard_home_manager/locale"
-    private val localNetworkChannelName = "com.jgeek00.adguard_home_manager/local_network"
-    private val installedAppsChannelName = "com.jgeek00.adguard_home_manager/installed_apps"
+    private val channelName = "com.wu.adgogogo/locale"
+    private val localNetworkChannelName = "com.wu.adgogogo/local_network"
+    private val installedAppsChannelName = "com.wu.adgogogo/installed_apps"
 
     // String literal on purpose: the constant only exists in API 37 SDK and
     // the project compiles with 36.
