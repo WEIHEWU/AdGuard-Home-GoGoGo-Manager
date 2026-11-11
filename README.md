@@ -2,35 +2,31 @@
 
 **[📥 点击直接下载安装包 (AdGuardHomeManager.apk)](https://github.com/WEIHEWU/AdGuard-Home-Manager-wu/raw/main/releases/AdGuardHomeManager.apk)** · [Releases 页面](https://github.com/WEIHEWU/AdGuard-Home-Manager-wu/releases) · [配套 Root 模块仓库 (AdGuard-Home-gogogo)](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu)
 
-基于 Flutter 开发的 **AdGuard-Home-gogogo Manager**（包名：`com.wu.adgogogo`），专为 [AdGuard-Home-gogogo](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu) 本地去广告模块深度定制。
+基于 Flutter 开发的 **AdGuard-Home-gogogo Manager**（包名：`com.wu.adgogogo`），专为 [AdGuard-Home-gogogo](https://github.com/WEIHEWU/AdGuard-Home-For-Android-wu) 全设备级去广告模块深度定制。
 
-当前版本：`2.24.14`（`versionCode 180`）。
+当前版本：`2.24.14`（`versionCode 180`，arm64-v8a 超轻量化体积仅 `8.2 MB`）。
 
 ---
 
-## ✨ 定制特性
+## ✨ 核心功能亮点
 
-- **三大模块运维工具（设置 -> 模块设置）**：
-  - **模块运行状态与自检**：实时展示 `AdGuardHome` 核心 PID、随机端口、`ADGUARD` (DNS 劫持链) 与 `AGH_SNI` (SNI 嗅探链) 状态，内置 `agh.log` 日志查看器、一键清空日志与一键重载防火墙规则；
-  - **清理应用开屏广告缓存**：无需重启手机，随时一键清理知乎、B站、美团、高德、音乐等应用的本地开屏广告缓存；
-  - **恢复默认自定义规则**：支持「智能补全（保留自建规则，仅补全缺失的模块默认规则）」与「完全重置为模块出厂默认规则」。
-- **同步上游 `v2.22.1` ~ `v2.22.2` 最新核心修复与特性**：
-  - 修复新版 AdGuard Home (`v0.108.0-b.84` 及以上)「加密设置」页面因 `allow_unencrypted_doh` 字段移除导致的加载报错；
-  - 新增 Android 16/17+ 本地网络权限 (`ACCESS_LOCAL_NETWORK`) 自动检测与请求，解决新版 Android 拦截本地/局域网连接问题；
-  - 新增应用内语言切换器（「设置 -> 应用设置 -> 语言」支持切换「跟随系统 / 简体中文 / English」）及 Android 13+ 系统分应用语言同步；
-  - 优化加密证书无害提示的 Snackbar 展示体验。
-- **模块零配置自动连接**：
-  - 启动时通过 Root 权限自动解析 `/data/adb/agh/bin/AdGuardHome.yaml` 中的动态随机管理端口 (`http.address`)，开机或软重启换端口后打开 App 即可无缝重连。
-- **`$important` 最高优先级一键放行/拦截**：
-  - 在「查询日志」页面点击任意域名执行放行或拦截时，自动生成带 `$important` 修饰符的高优规则（如 `@@||example.com^$important` 或 `||example.com^$important`），确保手动规则 100% 优先于第三方订阅列表，并精确匹配目标域名防止误删子域名规则。
-- **双模代理 `PROXY_URL` 订阅管理（即时生效）**：
-  - 在「设置 -> 模块设置 -> `PROXY_URL 订阅链接`」中：
-    - **留空（默认）**：配合独立 VPN App 使用；
-    - **填入订阅链接并保存**：保存瞬间自动触发模块 `ProxyConfig.sh --once` 将订阅地址与最新本地 DNS 端口同步至 Box / Clash / Mihomo 并温和重启代理服务。
-- **Miuix 界面细节修复**：
-  - 修复原版在部分深色/动态取色主题下 `CustomRadioListTile` 单选按钮边框透明不可见的显示 Bug。
-- **通知栏快捷磁贴 (Quick Settings Tile)**：
-  - 支持在系统下拉通知栏添加「AdGuard Home」快捷开关磁贴，一键暂停或恢复过滤。
+1. **「🌐 海外模式 / 🇨🇳 国内模式」双入口一键无损热切换**：
+   - 在 **首页顶部快捷栏** 与 **设置 -> DNS 设置页顶部** 均内置双模分段切换开关（初次安装默认激活 **🌐 海外模式**）；
+   - 点击即可调用模块底层 `switch_mode.sh` 毫秒级热切换上游加密 DNS（Cloudflare/Google/Quad9 vs 阿里/腾讯 DoH）、规则加速源与 VPN 伴生策略，**100% 保留个人自定义规则与动态端口**，无需重启手机即时生效。
+2. **分应用白名单（App Allowlist）**：
+   - 原生高性能加载手机已安装应用图标、名称与 UID（支持搜索、已勾选置顶及显示系统应用）；
+   - 勾选保存后即时同步至模块内核 `iptables` 规则链（`-m owner --uid-owner`），被放行的应用直接绕过 DNS 与 SNI 拦截，零后台耗电。
+3. **误杀排错助手（首页 -> 误杀排错）**：
+   - **近期拦截域名一键放行**：自动聚合最近被 DNS 或 SNI 拦截的域名，支持一键带 `$important` 最高优先级放行并冲洗系统 DNS 缓存；
+   - **网页链接域名嗅探器**：支持粘贴网页链接或分享口令，自动抓取网页源码及同源 `iframe` 中引用的所有主域名与静态资源/CDN 域名（智能过滤局域网私有 IP）；
+   - **应用本地缓存域名扫描 + 冷启动抓包复现**：支持扫描目标应用私有目录缓存的接口域名，或一键清理 DNS 缓存并冷启动目标应用进行实时抓包排查；
+   - **本地规则库关键词检索**：支持直接在 `/data/adb/agh/bin/data/filters/*.txt` 数十万条规则中按关键词检索并一键放行。
+4. **免登录零配置直连 & 状态栏快捷磁贴**：
+   - 彻底移除原版繁琐的多服务器数据库（`sqflite`）、首次引导向导与冗余图表组件，启动时通过 Root 自动读取 `/data/adb/agh/bin/AdGuardHome.yaml` 中的动态管理端口并秒级直连本地实例；
+   - 支持系统下拉通知栏「AdGuard Home」快捷开关磁贴，开机或模块换端口后自动重绑。
+5. **合一化 DNS 设置与模块运维工具箱**：
+   - 单页整合 Upstream / Bootstrap / Fallback DNS、查询模式（负载均衡 / 并行请求 / 最快 IP）、乐观缓存、强力模式（SNI 阻断）及上游连通性测速；
+   - 内置模块运行状态自检与 `agh.log` 日志查看器、一键刷新网络与防火墙规则、一键清理应用开屏广告缓存、以及一键智能补全/重置出厂默认自定义规则。
 
 ---
 
@@ -40,13 +36,13 @@
 
 ```bash
 flutter pub get
-flutter build apk --release --target-platform android-arm64
+flutter build apk --release --target-platform android-arm64 --obfuscate --split-debug-info=build/symbols
 ```
 
 构建产物位于 `build/app/outputs/flutter-apk/app-release.apk`。
 
-## 致谢与开源许可
+## 维护与开源许可
 
-- 上游原版项目：[JGeek00/adguard-home-manager](https://github.com/JGeek00/adguard-home-manager)
-- 修改与维护：[wu](https://github.com/WEIHEWU)
+- 作者与维护：[wu](https://github.com/WEIHEWU)
+- 上游原版基础：[JGeek00/adguard-home-manager](https://github.com/JGeek00/adguard-home-manager)
 - 开源协议：GNU General Public License v3.0 (GPL-3.0)，详见 [LICENSE.md](LICENSE.md)。
