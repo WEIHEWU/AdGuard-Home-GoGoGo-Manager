@@ -21,17 +21,18 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.15
-          name: "AdGuard-Home-GoGoGo Manager v2.24.15"
+          tag_name: v2.24.16
+          name: "AdGuard-Home-GoGoGo Manager v2.24.16"
           body: |
-            ### AdGuard-Home-GoGoGo Manager `v2.24.15`
+            ### AdGuard-Home-GoGoGo Manager `v2.24.16`
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            #### 🆕 v2.24.15 更新亮点
-            - **品牌规范统一**：
-              - 应用桌面名称更新为 `AdGuard Home GoGoGo`，通知栏快捷磁贴名称更新为 `AGH GoGoGo`，仓库地址更新为 `WEIHEWU/AdGuard-Home-GoGoGo-Manager`；
-            - **内置「🌐 海外模式 (Overseas) / 🇨🇳 国内模式 (CN)」双模一键热切换**：
-              - 首页顶部快捷卡片与 DNS 设置页均内置双模分段切换开关（默认激活海外模式），一键无损切换上游加密 DNS、订阅规则源与 VPN 接管策略，100% 保留个人自定义规则与动态端口。
+            #### 🆕 v2.24.16 修复与优化
+            - **彻底消除纯 DNS 模式「SNI 过滤规则未生效」误报警告条**：
+              - 自动读取模块 `config.prop` 中的 `ENABLE_SNI` 状态；在默认纯 DNS 防火墙模式（`ENABLE_SNI=0`）下不再强制检测 `AGH_SNI` / `NFQUEUE` 规则，核心存活且 `nat` 表 `ADGUARD` 链正常挂载时主页与设置页显示完全健康；
+            - **根治「双模切换 / 网络刷新 / 一键修复」掉线与断网问题**：
+              - 切换运行模式、「网络刷新」与「一键修复」前主动清理全部手动停止锁标记，100% 统一委托模块根命名空间控制接口（`service.sh --restart` / `--repair`）安全热切换与自愈，并自动重同步 HTTP 控制端口；
+              - 内置多路径 `su` 探测与 Magisk / KernelSU / APatch `PATH` 注入，全面兼容各类永久与临时 Root 环境。
           files: |
             releases/AdGuardHomeManager.apk

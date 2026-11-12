@@ -18,6 +18,7 @@ import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/providers/dns_provider.dart';
 import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
+import 'package:adguard_home_manager/providers/status_provider.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
 
 class DnsSettings extends StatefulWidget {
@@ -72,16 +73,30 @@ class _DnsSettingsState extends State<DnsSettings> {
       _runMode = targetMode;
     });
 
+    final serversProvider =
+        Provider.of<ServersProvider>(context, listen: false);
+    final statusProvider = Provider.of<StatusProvider>(context, listen: false);
     final dnsProvider = Provider.of<DnsProvider>(context, listen: false);
     final filteringProvider =
         Provider.of<FilteringProvider>(context, listen: false);
     final appConfigProvider =
         Provider.of<AppConfigProvider>(context, listen: false);
+    final service = ModuleConfigService();
 
-    final ok = await ModuleConfigService().switchRunMode(targetMode);
-    await Future.delayed(const Duration(milliseconds: 600));
+    final ok = await service.switchRunMode(targetMode);
+    final addr = await service.readHttpAddress();
+    if (addr != null &&
+        addr.isNotEmpty &&
+        addr != appConfigProvider.moduleHttpAddress) {
+      appConfigProvider.setModuleHttpAddress(addr);
+      await serversProvider.autoConnectModule(addr);
+    }
+    await Future.delayed(const Duration(milliseconds: 300));
     final fetched = await dnsProvider.fetchDnsData(showLoading: false);
-    await filteringProvider.fetchFilters(showLoading: false);
+    await Future.wait([
+      filteringProvider.fetchFilters(showLoading: false),
+      statusProvider.getServerStatus(withLoadingIndicator: false),
+    ]);
 
     if (!mounted) return;
     setState(() {

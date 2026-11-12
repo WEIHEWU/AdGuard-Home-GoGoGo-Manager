@@ -6,6 +6,7 @@ import 'package:adguard_home_manager/screens/home/summary_cards.dart';
 import 'package:adguard_home_manager/screens/home/protection_switch.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
 import 'package:adguard_home_manager/constants/enums.dart';
+import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
 
@@ -140,7 +141,19 @@ class _HomeState extends State<Home> {
                       icon: const Icon(Icons.refresh_rounded),
                       label: const Text('重新同步端口并重试'),
                       onPressed: () async {
-                        await ModuleConfigService().reloadFirewallRules();
+                        final service = ModuleConfigService();
+                        final serversProvider = Provider.of<ServersProvider>(
+                            context,
+                            listen: false);
+                        final appConfigProvider =
+                            Provider.of<AppConfigProvider>(context,
+                                listen: false);
+                        await service.reloadFirewallRules();
+                        final addr = await service.readHttpAddress();
+                        if (addr != null && addr.isNotEmpty) {
+                          appConfigProvider.setModuleHttpAddress(addr);
+                          await serversProvider.autoConnectModule(addr);
+                        }
                         await statusProvider.getServerStatus();
                       },
                     ),

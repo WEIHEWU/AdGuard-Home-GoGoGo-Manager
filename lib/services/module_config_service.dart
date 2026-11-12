@@ -15,13 +15,45 @@ class ModuleConfigService {
   static DateTime? _cachedProxyUrlTime;
   static List<Map<String, dynamic>>? _cachedApps;
   static DateTime? _cachedAppsTime;
+  static String? _cachedSuBin;
 
   bool get _isAndroid => Platform.isAndroid;
+
+  static const String _pathPrefix =
+      'export PATH="/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:\$PATH"; ';
+
+  Future<ProcessResult> _runSu(String command) async {
+    const defaultCandidates = <String>[
+      'su',
+      '/sbin/su',
+      '/system/bin/su',
+      '/system/xbin/su',
+      '/debug_ramdisk/su',
+    ];
+    final first = _cachedSuBin;
+    final candidates = first != null
+        ? <String>[first, ...defaultCandidates.where((e) => e != first)]
+        : defaultCandidates;
+    ProcessResult? lastResult;
+    for (final su in candidates) {
+      try {
+        final result = await Process.run(su, ['-c', '$_pathPrefix$command']);
+        lastResult = result;
+        if (result.exitCode == 0) {
+          _cachedSuBin = su;
+          return result;
+        }
+      } catch (_) {
+        // Try next su candidate
+      }
+    }
+    return lastResult ?? ProcessResult(0, 1, '', 'su unavailable');
+  }
 
   Future<bool> hasRoot() async {
     if (!_isAndroid) return false;
     try {
-      final result = await Process.run('su', ['-c', 'id']);
+      final result = await _runSu('id');
       return result.stdout.toString().contains('uid=0');
     } catch (_) {
       return false;
@@ -31,7 +63,7 @@ class ModuleConfigService {
   Future<String?> readAdGuardYaml() async {
     if (!_isAndroid) return null;
     try {
-      final result = await Process.run('su', ['-c', 'cat $moduleYamlPath']);
+      final result = await _runSu('cat $moduleYamlPath');
       if (result.exitCode != 0) {
         return null;
       }
@@ -162,7 +194,8 @@ class ModuleConfigService {
         'pid': '',
         'dnsPort': '',
         'natOk': false,
-        'sniOk': false,
+        'sniEnabled': false,
+        'sniOk': true,
         'vpnMode': 'off',
         'rssMb': '',
         'allowlistCount': 0,
@@ -179,10 +212,22 @@ class ModuleConfigService {
     try {
       const cmd = '''
 pid=\$(pidof AdGuardHome 2>/dev/null | awk '{print \$1}')
+if [ -z "\$pid" ] && [ -f /data/adb/agh/bin/AdGuardHome.pid ]; then
+  cand=\$(cat /data/adb/agh/bin/AdGuardHome.pid 2>/dev/null)
+  if [ -n "\$cand" ] && kill -0 "\$cand" 2>/dev/null && [ "\$(cat "/proc/\$cand/comm" 2>/dev/null)" = "AdGuardHome" ]; then
+    pid="\$cand"
+  fi
+fi
 dns_port=\$(sed -n 's/^redir_port=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | head -n 1)
 run_mode=\$(sed -n 's/^RUN_MODE=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | head -n 1)
+enable_sni=\$(sed -n 's/^ENABLE_SNI=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | tr -d '[:space:]' | head -n 1)
+[ -z "\$enable_sni" ] && enable_sni=0
 iptables -w 2 -t nat -C OUTPUT -j ADGUARD >/dev/null 2>&1 && nat_ok=1 || nat_ok=0
-iptables -w 2 -t filter -C OUTPUT -j AGH_SNI >/dev/null 2>&1 && sni_ok=1 || sni_ok=0
+if [ "\$enable_sni" = "1" ]; then
+  iptables -w 2 -t filter -C OUTPUT -j AGH_SNI >/dev/null 2>&1 && sni_ok=1 || sni_ok=0
+else
+  sni_ok=1
+fi
 vpn_mode=\$(cat /data/adb/agh/vpn_mode_status 2>/dev/null | head -n 1)
 rss_kb=""
 [ -n "\$pid" ] && rss_kb=\$(awk '/^VmRSS:/ {print \$2}' "/proc/\$pid/status" 2>/dev/null)
@@ -192,19 +237,21 @@ echo "PID=\$pid"
 echo "PORT=\$dns_port"
 echo "MODE=\$run_mode"
 echo "NAT=\$nat_ok"
+echo "SNI_EN=\$enable_sni"
 echo "SNI=\$sni_ok"
 echo "VPN=\$vpn_mode"
 echo "RSS=\$rss_kb"
 echo "ALLOW=\$allow_cnt"
 ''';
-      final result = await Process.run('su', ['-c', cmd]);
+      final result = await _runSu(cmd);
       if (result.exitCode != 0) {
         return {
           'running': false,
           'pid': '',
           'dnsPort': '',
           'natOk': false,
-          'sniOk': false,
+          'sniEnabled': false,
+          'sniOk': true,
           'vpnMode': 'off',
           'rssMb': '',
           'allowlistCount': 0,
@@ -215,7 +262,8 @@ echo "ALLOW=\$allow_cnt"
       String dnsPort = '';
       String runMode = 'overseas';
       bool natOk = false;
-      bool sniOk = false;
+      bool sniEnabled = false;
+      bool sniOk = true;
       String vpnMode = 'off';
       String rssKb = '';
       int allowlistCount = 0;
@@ -228,6 +276,9 @@ echo "ALLOW=\$allow_cnt"
           runMode = (m == 'cn') ? 'cn' : 'overseas';
         }
         if (t.startsWith('NAT=')) natOk = t.substring(4).trim() == '1';
+        if (t.startsWith('SNI_EN=')) {
+          sniEnabled = t.substring(7).trim() == '1';
+        }
         if (t.startsWith('SNI=')) sniOk = t.substring(4).trim() == '1';
         if (t.startsWith('VPN=')) vpnMode = t.substring(4).trim();
         if (t.startsWith('RSS=')) rssKb = t.substring(4).trim();
@@ -235,16 +286,21 @@ echo "ALLOW=\$allow_cnt"
           allowlistCount = int.tryParse(t.substring(6).trim()) ?? 0;
         }
       }
+      if (!sniEnabled) {
+        sniOk = true;
+      }
       String rssMb = '';
       final kb = int.tryParse(rssKb);
       if (kb != null && kb > 0) {
         rssMb = '${(kb / 1024).toStringAsFixed(1)} MB';
       }
+      final running = pid.isNotEmpty;
       final diag = {
-        'running': pid.isNotEmpty,
+        'running': running,
         'pid': pid,
         'dnsPort': dnsPort,
-        'natOk': natOk,
+        'natOk': running && natOk,
+        'sniEnabled': sniEnabled,
         'sniOk': sniOk,
         'vpnMode': vpnMode.isEmpty ? 'off' : vpnMode,
         'rssMb': rssMb,
@@ -260,7 +316,8 @@ echo "ALLOW=\$allow_cnt"
         'pid': '',
         'dnsPort': '',
         'natOk': false,
-        'sniOk': false,
+        'sniEnabled': false,
+        'sniOk': true,
         'vpnMode': 'off',
         'rssMb': '',
         'allowlistCount': 0,
@@ -272,9 +329,8 @@ echo "ALLOW=\$allow_cnt"
   Future<String> readRunMode() async {
     if (!_isAndroid) return 'overseas';
     try {
-      final result = await Process.run(
-        'su',
-        ['-c', "sed -n 's/^RUN_MODE=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | head -n 1"],
+      final result = await _runSu(
+        "sed -n 's/^RUN_MODE=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | head -n 1",
       );
       if (result.exitCode != 0) return 'overseas';
       final mode = result.stdout.toString().trim().toLowerCase();
@@ -286,14 +342,12 @@ echo "ALLOW=\$allow_cnt"
 
   Future<bool> switchRunMode(String targetMode) async {
     if (!_isAndroid) return false;
-    final normalized = targetMode.trim().toLowerCase() == 'cn' ? 'cn' : 'overseas';
+    final normalized =
+        targetMode.trim().toLowerCase() == 'cn' ? 'cn' : 'overseas';
     try {
-      final result = await Process.run(
-        'su',
-        [
-          '-c',
-          'sh /data/adb/agh/scripts/switch_mode.sh $normalized >/dev/null 2>&1'
-        ],
+      final result = await _runSu(
+        'rm -f /dev/shm/agh_manual_stop /data/adb/agh/run/agh_manual_stop /data/adb/agh/manual_stop /data/adb/agh/stopped /data/adb/agh/app_pause_active 2>/dev/null; '
+        '/system/bin/sh /data/adb/agh/scripts/switch_mode.sh $normalized >/dev/null 2>&1',
       );
       _cachedDiag = null;
       _cachedDiagTime = null;
@@ -306,9 +360,8 @@ echo "ALLOW=\$allow_cnt"
   Future<String> readModuleLogs({int maxLines = 150}) async {
     if (!_isAndroid) return '';
     try {
-      final result = await Process.run(
-        'su',
-        ['-c', 'tail -n $maxLines /data/adb/agh/agh.log 2>/dev/null'],
+      final result = await _runSu(
+        'tail -n $maxLines /data/adb/agh/agh.log 2>/dev/null',
       );
       if (result.exitCode != 0) return '';
       return result.stdout.toString().trim();
@@ -320,10 +373,7 @@ echo "ALLOW=\$allow_cnt"
   Future<bool> clearModuleLogs() async {
     if (!_isAndroid) return false;
     try {
-      final result = await Process.run(
-        'su',
-        ['-c', ': > /data/adb/agh/agh.log 2>/dev/null'],
-      );
+      final result = await _runSu(': > /data/adb/agh/agh.log 2>/dev/null');
       return result.exitCode == 0;
     } catch (_) {
       return false;
@@ -333,12 +383,13 @@ echo "ALLOW=\$allow_cnt"
   Future<bool> reloadFirewallRules() async {
     if (!_isAndroid) return false;
     try {
-      final result = await Process.run(
-        'su',
-        [
-          '-c',
-          'if grep -q -- "--reload" /data/adb/agh/scripts/iptables.sh 2>/dev/null; then if pidof -x /data/adb/agh/scripts/iptables.sh >/dev/null 2>&1; then sh /data/adb/agh/scripts/iptables.sh --reload >/dev/null 2>&1; else sh /data/adb/agh/scripts/iptables.sh >/dev/null 2>&1 & fi; else rm -f /data/adb/agh/scripts/running.lock; pkill -f "/data/adb/agh/scripts/iptables.sh" 2>/dev/null; sh /data/adb/modules/AdGuardHome/service.sh >/dev/null 2>&1 & fi'
-        ],
+      final result = await _runSu(
+        'rm -f /dev/shm/agh_manual_stop /data/adb/agh/run/agh_manual_stop /data/adb/agh/manual_stop /data/adb/agh/stopped /data/adb/agh/app_pause_active 2>/dev/null; '
+        'if [ -f /data/adb/modules/AdGuardHome/service.sh ]; then '
+        '  /system/bin/sh /data/adb/modules/AdGuardHome/service.sh --repair >/dev/null 2>&1; '
+        'else '
+        '  /system/bin/sh /data/adb/agh/scripts/iptables.sh --reload >/dev/null 2>&1; '
+        'fi',
       );
       _cachedDiag = null;
       _cachedDiagTime = null;
@@ -351,9 +402,10 @@ echo "ALLOW=\$allow_cnt"
   Future<bool> flushSystemDnsCache() async {
     if (!_isAndroid) return false;
     try {
-      final result = await Process.run(
-        'su',
-        ['-c', 'ndc resolver flushenv >/dev/null 2>&1 || true'],
+      final result = await _runSu(
+        'ndc resolver flushenv >/dev/null 2>&1 || true; '
+        'ndc resolver flushdefaultif >/dev/null 2>&1 || true; '
+        'cmd netd resolver flushdefaultif >/dev/null 2>&1 || true',
       );
       return result.exitCode == 0;
     } catch (_) {
@@ -786,9 +838,9 @@ fi
 mkdir -p /data/adb/agh
 printf '%s\n' '$escaped' > /data/adb/agh/app-allow.txt
 chmod 644 /data/adb/agh/app-allow.txt
-sh /data/adb/agh/scripts/iptables.sh --apply-allowlist >/dev/null 2>&1 &
+/system/bin/sh /data/adb/agh/scripts/iptables.sh --apply-allowlist >/dev/null 2>&1
 ''';
-      final result = await Process.run('su', ['-c', cmd]);
+      final result = await _runSu(cmd);
       _cachedDiag = null;
       _cachedDiagTime = null;
       return result.exitCode == 0;

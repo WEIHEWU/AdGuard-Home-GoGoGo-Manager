@@ -34,7 +34,8 @@ class _SettingsWidgetState extends State<Settings> {
     'pid': '',
     'dnsPort': '',
     'natOk': false,
-    'sniOk': false,
+    'sniEnabled': false,
+    'sniOk': true,
     'vpnMode': 'off',
     'rssMb': '',
     'allowlistCount': 0,
@@ -76,7 +77,8 @@ class _SettingsWidgetState extends State<Settings> {
     if (_diagLoading) return isZh ? '正在检测…' : 'Checking status…';
     final running = _diag['running'] == true;
     final natOk = _diag['natOk'] == true;
-    final sniOk = _diag['sniOk'] == true;
+    final sniEnabled = _diag['sniEnabled'] == true;
+    final sniOk = !sniEnabled || (_diag['sniOk'] == true);
     final vpnMode = (_diag['vpnMode'] ?? 'off').toString();
     final rssMb = (_diag['rssMb'] ?? '').toString();
     final addrSuffix = moduleAddr.isNotEmpty ? ' · $moduleAddr' : '';
@@ -99,7 +101,7 @@ class _SettingsWidgetState extends State<Settings> {
     }
     final issues = <String>[
       if (!natOk) isZh ? 'DNS 未接管' : 'DNS NAT off',
-      if (!sniOk) isZh ? 'SNI 未生效' : 'SNI filter off',
+      if (sniEnabled && !sniOk) isZh ? 'SNI 未生效' : 'SNI filter off',
     ].join(' / ');
     return isZh
         ? '运行中 · $issues$memText$vpnText$addrSuffix'

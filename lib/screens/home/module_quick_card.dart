@@ -34,6 +34,7 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
   Map<String, dynamic> _diag = {
     'running': true,
     'natOk': true,
+    'sniEnabled': false,
     'sniOk': true,
     'runMode': 'overseas',
   };
@@ -54,6 +55,20 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
     });
   }
 
+  Future<void> _syncHttpAddressIfNeeded(
+    ServersProvider serversProvider,
+    AppConfigProvider appConfigProvider,
+    ModuleConfigService service,
+  ) async {
+    final addr = await service.readHttpAddress();
+    if (addr != null &&
+        addr.isNotEmpty &&
+        addr != appConfigProvider.moduleHttpAddress) {
+      appConfigProvider.setModuleHttpAddress(addr);
+      await serversProvider.autoConnectModule(addr);
+    }
+  }
+
   Future<void> _handleSwitchMode(String targetMode) async {
     final currentMode = (_diag['runMode'] ?? 'overseas').toString();
     if (_switchingMode || targetMode == currentMode) return;
@@ -63,6 +78,8 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
       _diag['runMode'] = targetMode;
     });
 
+    final serversProvider =
+        Provider.of<ServersProvider>(context, listen: false);
     final statusProvider = Provider.of<StatusProvider>(context, listen: false);
     final dnsProvider = Provider.of<DnsProvider>(context, listen: false);
     final filteringProvider =
@@ -72,7 +89,8 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
     final service = ModuleConfigService();
 
     final ok = await service.switchRunMode(targetMode);
-    await Future.delayed(const Duration(milliseconds: 600));
+    await _syncHttpAddressIfNeeded(serversProvider, appConfigProvider, service);
+    await Future.delayed(const Duration(milliseconds: 300));
     await Future.wait([
       _loadDiagnostics(forceRefresh: true),
       statusProvider.getServerStatus(withLoadingIndicator: false),
@@ -103,14 +121,14 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
         Provider.of<AppConfigProvider>(context, listen: false);
     final service = ModuleConfigService();
 
-    await Future.wait([
-      if (serversProvider.apiClient2 != null)
-        serversProvider.apiClient2!.resetDnsCache(),
-      service.flushSystemDnsCache(),
-      service.reloadFirewallRules(),
-    ]);
+    final repaired = await service.reloadFirewallRules();
+    await _syncHttpAddressIfNeeded(serversProvider, appConfigProvider, service);
+    if (serversProvider.apiClient2 != null) {
+      await serversProvider.apiClient2!.resetDnsCache();
+    }
+    await service.flushSystemDnsCache();
 
-    await Future.delayed(const Duration(milliseconds: 500));
+    await Future.delayed(const Duration(milliseconds: 250));
     await Future.wait([
       _loadDiagnostics(forceRefresh: true),
       statusProvider.getServerStatus(withLoadingIndicator: false),
@@ -120,8 +138,8 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
     setState(() => _flushing = false);
     showSnackbar(
       appConfigProvider: appConfigProvider,
-      label: '已刷新 DNS 缓存并重载规则',
-      color: Colors.green,
+      label: repaired ? '已修复并刷新 DNS 缓存与转发规则' : '操作失败，请检查 Root 权限',
+      color: repaired ? Colors.green : Colors.red,
     );
   }
 
@@ -154,11 +172,12 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
     if (_loadingDiag || !generalEnabled) return null;
     final running = _diag['running'] == true;
     final natOk = _diag['natOk'] == true;
+    final sniEnabled = _diag['sniEnabled'] == true;
     final sniOk = _diag['sniOk'] == true;
     if (!running) return '模块核心未运行';
-    if (!natOk && !sniOk) return 'DNS 与 SNI 转发未生效';
+    if (sniEnabled && !natOk && !sniOk) return 'DNS 与 SNI 转发未生效';
     if (!natOk) return 'DNS 转发规则未生效';
-    if (!sniOk) return 'SNI 过滤规则未生效';
+    if (sniEnabled && !sniOk) return 'SNI 过滤规则未生效';
     return null;
   }
 
