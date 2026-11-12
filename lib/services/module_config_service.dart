@@ -194,8 +194,8 @@ class ModuleConfigService {
         'pid': '',
         'dnsPort': '',
         'natOk': false,
-        'sniEnabled': false,
-        'sniOk': true,
+        'sniEnabled': true,
+        'sniOk': false,
         'vpnMode': 'off',
         'rssMb': '',
         'allowlistCount': 0,
@@ -221,10 +221,15 @@ fi
 dns_port=\$(sed -n 's/^redir_port=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | head -n 1)
 run_mode=\$(sed -n 's/^RUN_MODE=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | head -n 1)
 enable_sni=\$(sed -n 's/^ENABLE_SNI=//p' /data/adb/agh/scripts/config.prop 2>/dev/null | tr -d '[:space:]' | head -n 1)
-[ -z "\$enable_sni" ] && enable_sni=0
+[ -z "\$enable_sni" ] && enable_sni=1
 iptables -w 2 -t nat -C OUTPUT -j ADGUARD >/dev/null 2>&1 && nat_ok=1 || nat_ok=0
 if [ "\$enable_sni" = "1" ]; then
-  iptables -w 2 -t filter -C OUTPUT -j AGH_SNI >/dev/null 2>&1 && sni_ok=1 || sni_ok=0
+  if iptables -w 2 -t mangle -C OUTPUT -j AGH_SNI >/dev/null 2>&1 &&
+     iptables -w 2 -t mangle -S AGH_SNI 2>/dev/null | grep -q -- "-j NFQUEUE"; then
+    sni_ok=1
+  else
+    sni_ok=0
+  fi
 else
   sni_ok=1
 fi
@@ -250,8 +255,8 @@ echo "ALLOW=\$allow_cnt"
           'pid': '',
           'dnsPort': '',
           'natOk': false,
-          'sniEnabled': false,
-          'sniOk': true,
+          'sniEnabled': true,
+          'sniOk': false,
           'vpnMode': 'off',
           'rssMb': '',
           'allowlistCount': 0,
@@ -262,8 +267,8 @@ echo "ALLOW=\$allow_cnt"
       String dnsPort = '';
       String runMode = 'overseas';
       bool natOk = false;
-      bool sniEnabled = false;
-      bool sniOk = true;
+      bool sniEnabled = true;
+      bool sniOk = false;
       String vpnMode = 'off';
       String rssKb = '';
       int allowlistCount = 0;
@@ -277,7 +282,7 @@ echo "ALLOW=\$allow_cnt"
         }
         if (t.startsWith('NAT=')) natOk = t.substring(4).trim() == '1';
         if (t.startsWith('SNI_EN=')) {
-          sniEnabled = t.substring(7).trim() == '1';
+          sniEnabled = t.substring(7).trim() != '0';
         }
         if (t.startsWith('SNI=')) sniOk = t.substring(4).trim() == '1';
         if (t.startsWith('VPN=')) vpnMode = t.substring(4).trim();
@@ -285,9 +290,6 @@ echo "ALLOW=\$allow_cnt"
         if (t.startsWith('ALLOW=')) {
           allowlistCount = int.tryParse(t.substring(6).trim()) ?? 0;
         }
-      }
-      if (!sniEnabled) {
-        sniOk = true;
       }
       String rssMb = '';
       final kb = int.tryParse(rssKb);
@@ -301,7 +303,7 @@ echo "ALLOW=\$allow_cnt"
         'dnsPort': dnsPort,
         'natOk': running && natOk,
         'sniEnabled': sniEnabled,
-        'sniOk': sniOk,
+        'sniOk': !sniEnabled || (running && sniOk),
         'vpnMode': vpnMode.isEmpty ? 'off' : vpnMode,
         'rssMb': rssMb,
         'allowlistCount': allowlistCount,
@@ -316,8 +318,8 @@ echo "ALLOW=\$allow_cnt"
         'pid': '',
         'dnsPort': '',
         'natOk': false,
-        'sniEnabled': false,
-        'sniOk': true,
+        'sniEnabled': true,
+        'sniOk': false,
         'vpnMode': 'off',
         'rssMb': '',
         'allowlistCount': 0,

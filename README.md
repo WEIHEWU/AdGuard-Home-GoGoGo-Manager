@@ -6,7 +6,7 @@
 
 基于 Flutter 开发的 **AdGuard-Home-GoGoGo Manager**（应用桌面名称：`AdGuard Home GoGoGo`，快捷磁贴名称：`AGH GoGoGo`，包名：`com.wu.adgogogo`），专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 全设备级去广告模块深度定制。
 
-当前版本：`2.24.16`（`versionCode 182`，arm64-v8a 超轻量化体积仅 `8.2 MB`）。
+当前版本：`2.24.17`（`versionCode 183`，arm64-v8a 超轻量化体积仅 `8.2 MB`）。
 
 ---
 

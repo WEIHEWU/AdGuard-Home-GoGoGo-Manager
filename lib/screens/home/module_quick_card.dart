@@ -34,7 +34,7 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
   Map<String, dynamic> _diag = {
     'running': true,
     'natOk': true,
-    'sniEnabled': false,
+    'sniEnabled': true,
     'sniOk': true,
     'runMode': 'overseas',
   };

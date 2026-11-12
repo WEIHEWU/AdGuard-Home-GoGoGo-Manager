@@ -34,8 +34,8 @@ class _SettingsWidgetState extends State<Settings> {
     'pid': '',
     'dnsPort': '',
     'natOk': false,
-    'sniEnabled': false,
-    'sniOk': true,
+    'sniEnabled': true,
+    'sniOk': false,
     'vpnMode': 'off',
     'rssMb': '',
     'allowlistCount': 0,
@@ -95,6 +95,11 @@ class _SettingsWidgetState extends State<Settings> {
     }
     final memText = rssMb.isNotEmpty ? ' · $rssMb' : '';
     if (natOk && sniOk) {
+      if (sniEnabled) {
+        return isZh
+            ? '运行中 · DNS + SNI 双链生效$memText$vpnText$addrSuffix'
+            : 'Running · DNS + SNI Active$memText$vpnText$addrSuffix';
+      }
       return isZh
           ? '运行中 · 转发正常$memText$vpnText$addrSuffix'
           : 'Running · Forwarding OK$memText$vpnText$addrSuffix';
@@ -137,7 +142,9 @@ class _SettingsWidgetState extends State<Settings> {
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
                         color: (_diag['running'] == true &&
-                                _diag['natOk'] == true)
+                                _diag['natOk'] == true &&
+                                (!(_diag['sniEnabled'] == true) ||
+                                    _diag['sniOk'] == true))
                             ? Colors.green
                             : Colors.orange,
                       ),
