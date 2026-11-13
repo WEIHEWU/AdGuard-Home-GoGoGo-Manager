@@ -86,21 +86,68 @@ class FilteringProvider with ChangeNotifier {
   }
 
   Future<Map<String, dynamic>> updateLists() async {
-    final result = await _serversProvider!.apiClient2!.updateLists();
-    if (result.successful == true) {
-      final result2 = await _serversProvider!.apiClient2!.getFiltering();
-      if (result2.successful == true) {
-        _filtering = result2.content as Filtering;
-        notifyListeners();
-        return {"success": true, "data": result.content};
-      } else {
-        notifyListeners();
-        return {"success": false};
-      }
-    } else {
+    final api = _serversProvider?.apiClient2;
+    if (api == null) {
       notifyListeners();
       return {"success": false};
     }
+
+    final prevRules = <int, int>{};
+    final prevUpdated = <int, DateTime?>{};
+    if (_filtering != null) {
+      for (final f in [..._filtering!.filters, ..._filtering!.whitelistFilters]) {
+        prevRules[f.id] = f.rulesCount;
+        prevUpdated[f.id] = f.lastUpdated;
+      }
+    }
+
+    final result = await api.updateLists();
+    final result2 = await api.getFiltering();
+
+    int changedListsCount = 0;
+    if (result2.successful == true) {
+      final latest = result2.content as Filtering;
+      for (final f in [...latest.filters, ...latest.whitelistFilters]) {
+        final oldRules = prevRules[f.id];
+        final oldTime = prevUpdated[f.id];
+        final rulesChanged = oldRules != null && oldRules != f.rulesCount;
+        final timeAdvanced = f.lastUpdated != null &&
+            (oldTime == null || f.lastUpdated!.isAfter(oldTime));
+        if (rulesChanged) {
+          changedListsCount++;
+        } else if (!result.successful && timeAdvanced) {
+          changedListsCount++;
+        }
+      }
+      _filtering = latest;
+      _loadStatus = LoadStatus.loaded;
+    }
+
+    if (_statusProvider != null) {
+      unawaited(_statusProvider!.getServerStatus(withLoadingIndicator: false));
+    }
+    notifyListeners();
+
+    if (result.successful == true) {
+      final reported = (result.content is Map && result.content['updated'] is int)
+          ? result.content['updated'] as int
+          : 0;
+      final effectiveUpdated =
+          reported > 0 ? reported : (changedListsCount > 0 ? changedListsCount : 0);
+      return {
+        "success": true,
+        "data": {"updated": effectiveUpdated},
+      };
+    }
+
+    if (result2.successful == true && changedListsCount > 0) {
+      return {
+        "success": true,
+        "data": {"updated": changedListsCount},
+      };
+    }
+
+    return {"success": false};
   }
 
   Future<bool> enableDisableFiltering() async {

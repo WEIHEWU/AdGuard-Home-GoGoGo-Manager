@@ -182,6 +182,7 @@ class ApiClientV2 {
       urlPath: '/filtering/add_url',
       server: server,
       body: data,
+      timeout: 60,
     );
     return ApiResponse(
       successful: result.successful,
@@ -197,6 +198,7 @@ class ApiClientV2 {
       urlPath: '/filtering/set_url',
       server: server,
       body: data,
+      timeout: 60,
     );
     return ApiResponse(successful: result.successful);
   }
@@ -213,30 +215,47 @@ class ApiClientV2 {
   }
 
   Future<ApiResponse> updateLists() async {
-    final results = await Future.wait([
-      HttpRequestClient.post(
-        urlPath: '/filtering/refresh',
-        server: server,
-        body: {'whitelist': true},
-      ),
-      HttpRequestClient.post(
-        urlPath: '/filtering/refresh',
-        server: server,
-        body: {'whitelist': false},
-      ),
-    ]);
-    if (results.every((e) => e.successful && e.body != null)) {
-      try {
-        return ApiResponse(successful: true, content: {
-          'updated': jsonDecode(results[0].body!)['updated'] +
-              jsonDecode(results[1].body!)['updated'],
-        });
-      } catch (_) {
-        return const ApiResponse(successful: false);
+    final blockRes = await HttpRequestClient.post(
+      urlPath: '/filtering/refresh',
+      server: server,
+      body: {'whitelist': false},
+      timeout: 60,
+    );
+    final allowRes = await HttpRequestClient.post(
+      urlPath: '/filtering/refresh',
+      server: server,
+      body: {'whitelist': true},
+      timeout: 60,
+    );
+
+    int updated = 0;
+    bool anySucceeded = false;
+    for (final res in [blockRes, allowRes]) {
+      if (res.successful && res.body != null) {
+        try {
+          final decoded = jsonDecode(res.body!);
+          if (decoded is Map && decoded['updated'] is num) {
+            updated += (decoded['updated'] as num).toInt();
+            anySucceeded = true;
+          } else {
+            anySucceeded = true;
+          }
+        } catch (_) {
+          anySucceeded = true;
+        }
       }
-    } else {
-      return const ApiResponse(successful: false);
     }
+
+    if (anySucceeded) {
+      return ApiResponse(
+        successful: true,
+        content: {
+          'updated': updated,
+          'partial': !(blockRes.successful && allowRes.successful),
+        },
+      );
+    }
+    return const ApiResponse(successful: false);
   }
 
   Future<ApiResponse> requestChangeUpdateFrequency({
