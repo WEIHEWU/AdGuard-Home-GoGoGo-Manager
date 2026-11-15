@@ -13,14 +13,29 @@ import android.util.Log
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 object AdGuardModuleController {
     private const val YAML_PATH = "/data/adb/agh/bin/AdGuardHome.yaml"
     private const val USER = "root"
     private const val PASSWORD = "root"
     private const val TAG = "AdGuardModule"
+    private const val SU_PROBE_TIMEOUT_MS = 3000L
+    private const val SU_CMD_TIMEOUT_MS = 8000L
+
+    private val probeLock = Any()
     @Volatile
     private var cachedSuBin: String? = null
+    private var inFlightProbe: InFlightSuProbe? = null
+
+    private class InFlightSuProbe {
+        val latch = CountDownLatch(1)
+        val resultRef = AtomicReference<String?>(null)
+    }
 
     fun readPort(context: Context? = null, forceYaml: Boolean = false): Int? {
         if (!forceYaml) {
@@ -109,43 +124,200 @@ object AdGuardModuleController {
         val ok = httpRequest(port, "/control/protection", "POST", body) != null
         if (ok) {
             httpRequest(port, "/control/cache_clear", "POST", "")
-            runSu("ndc resolver flushenv 2>/dev/null")
+            runSu("ndc resolver flushenv >/dev/null 2>&1 || cmd netd resolver flushdefaultif >/dev/null 2>&1")
         }
         return ok
     }
 
-    private fun runSu(command: String): String? {
-        val defaultCandidates = listOf(
-            "su",
-            "/sbin/su",
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/debug_ramdisk/su",
-        )
-        val first = cachedSuBin
-        val candidates = if (first != null) {
-            listOf(first) + defaultCandidates.filter { it != first }
-        } else {
-            defaultCandidates
+    private val defaultSuCandidates = listOf(
+        "su",
+        "/sbin/su",
+        "/system/bin/su",
+        "/system/xbin/su",
+        "/debug_ramdisk/su",
+    )
+
+    private fun terminateAndReap(process: Process) {
+        try {
+            process.destroy()
+        } catch (_: Throwable) {
         }
-        for (su in candidates) {
+        try {
+            if (!process.waitFor(200, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly()
+                process.waitFor(500, TimeUnit.MILLISECONDS)
+            }
+        } catch (_: Throwable) {
             try {
-                val process = ProcessBuilder(su, "-c", command)
-                    .redirectErrorStream(true)
-                    .start()
-                val output = process.inputStream.bufferedReader().use { it.readText() }
-                val code = process.waitFor()
-                if (code == 0) {
-                    cachedSuBin = su
-                    return output
-                }
-                val detail = output.trim().take(200)
-                Log.w(TAG, "su($su) exit=$code${if (detail.isEmpty()) "" else " | $detail"}")
-            } catch (t: Throwable) {
-                Log.w(TAG, "su($su) unavailable", t)
+                process.destroyForcibly()
+            } catch (_: Throwable) {
             }
         }
-        return null
+    }
+
+    private fun runBoundedProcess(
+        commandArgs: List<String>,
+        timeoutMs: Long,
+        maxCaptureChars: Int = 8192
+    ): Pair<Int, String>? {
+        val process = try {
+            ProcessBuilder(commandArgs)
+                .redirectErrorStream(true)
+                .start()
+        } catch (_: Throwable) {
+            return null
+        }
+
+        val outputBuilder = StringBuilder()
+        val readerThread = Thread {
+            try {
+                process.inputStream.bufferedReader().use { reader ->
+                    val buf = CharArray(512)
+                    var read: Int
+                    while (reader.read(buf).also { read = it } != -1) {
+                        if (outputBuilder.length < maxCaptureChars) {
+                            val allow = (maxCaptureChars - outputBuilder.length).coerceAtMost(read)
+                            outputBuilder.append(buf, 0, allow)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+
+        val finished = try {
+            process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        } catch (_: Throwable) {
+            false
+        }
+
+        if (!finished) {
+            terminateAndReap(process)
+            try {
+                readerThread.join(100)
+            } catch (_: Throwable) {
+            }
+            return null
+        }
+
+        try {
+            readerThread.join(200)
+        } catch (_: Throwable) {
+        }
+        val exitCode = try {
+            process.exitValue()
+        } catch (_: Throwable) {
+            -1
+        }
+        return Pair(exitCode, outputBuilder.toString())
+    }
+
+    private fun resolveSuBin(forceRefresh: Boolean = false, excludeSu: String? = null): String? {
+        while (true) {
+            var existingProbe: InFlightSuProbe? = null
+            var ownProbe: InFlightSuProbe? = null
+            var initialCandidate: String? = null
+
+            synchronized(probeLock) {
+                val current = cachedSuBin
+                if (!forceRefresh && current != null && current != excludeSu) {
+                    return current
+                }
+                if (inFlightProbe != null) {
+                    existingProbe = inFlightProbe
+                } else {
+                    if (forceRefresh) {
+                        cachedSuBin = null
+                    }
+                    initialCandidate = current
+                    ownProbe = InFlightSuProbe()
+                    inFlightProbe = ownProbe
+                }
+            }
+
+            if (existingProbe != null) {
+                try {
+                    existingProbe!!.latch.await(
+                        SU_PROBE_TIMEOUT_MS * defaultSuCandidates.size + 1000L,
+                        TimeUnit.MILLISECONDS
+                    )
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return null
+                }
+                val res = existingProbe!!.resultRef.get()
+                if (!forceRefresh && res != null && res != excludeSu) {
+                    return res
+                }
+                if (forceRefresh && res != null && res != excludeSu) {
+                    val snapshot = synchronized(probeLock) { cachedSuBin }
+                    if (snapshot == res) {
+                        return res
+                    }
+                }
+                continue
+            }
+
+            val myProbe = ownProbe!!
+            try {
+                val candidates = if (initialCandidate != null) {
+                    listOf(initialCandidate!!) + defaultSuCandidates.filter { it != initialCandidate }
+                } else {
+                    defaultSuCandidates
+                }
+                var found: String? = null
+                for (su in candidates) {
+                    if (su == excludeSu) continue
+                    val probeRes = runBoundedProcess(
+                        listOf(su, "-c", "id -u"),
+                        SU_PROBE_TIMEOUT_MS,
+                        maxCaptureChars = 256
+                    )
+                    if (probeRes != null &&
+                        probeRes.first == 0 &&
+                        probeRes.second.lineSequence().firstOrNull()?.trim() == "0"
+                    ) {
+                        found = su
+                        break
+                    }
+                }
+                myProbe.resultRef.set(found)
+                synchronized(probeLock) {
+                    cachedSuBin = found
+                }
+                return found
+            } finally {
+                myProbe.latch.countDown()
+                synchronized(probeLock) {
+                    if (inFlightProbe === myProbe) {
+                        inFlightProbe = null
+                    }
+                }
+            }
+        }
+    }
+
+    private fun runSu(command: String): String? {
+        var su = resolveSuBin() ?: return null
+        var res = runBoundedProcess(listOf(su, "-c", command), SU_CMD_TIMEOUT_MS)
+        if (res == null) {
+            Log.w(TAG, "su($su) failed or timed out, re-probing")
+            su = resolveSuBin(forceRefresh = true, excludeSu = su) ?: return null
+            res = runBoundedProcess(listOf(su, "-c", command), SU_CMD_TIMEOUT_MS) ?: return null
+        }
+        return if (res.first == 0) {
+            res.second
+        } else {
+            val detail = res.second.trim().take(200)
+            Log.w(TAG, "su($su) exit=${res.first}${if (detail.isEmpty()) "" else " | $detail"}")
+            null
+        }
     }
 
     private fun httpRequest(port: Int, path: String, method: String, body: String? = null): String? {
@@ -185,7 +357,10 @@ class AdGuardTileService : TileService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile
     private var listening = false
-    private var refreshGeneration = 0
+    private val listenGeneration = AtomicInteger(0)
+    private val toggleInFlight = AtomicBoolean(false)
+    @Volatile
+    private var pendingRetryRunnable: Runnable? = null
 
     override fun onTileAdded() {
         super.onTileAdded()
@@ -193,18 +368,22 @@ class AdGuardTileService : TileService() {
             this,
             android.content.ComponentName(this, AdGuardTileService::class.java)
         )
-        updateTile(Tile.STATE_INACTIVE)
+        updateTileDirect(Tile.STATE_INACTIVE)
     }
 
     override fun onClick() {
         super.onClick()
-        val tile = qsTile ?: return
+        if (qsTile == null) return
+        if (!toggleInFlight.compareAndSet(false, true)) {
+            Log.i("AdGuardTile", "onClick ignored: toggle already in flight")
+            return
+        }
 
         Thread {
             try {
                 var port = AdGuardModuleController.readPort(this)
                 if (port == null) {
-                    updateTile(Tile.STATE_INACTIVE)
+                    updateTileDirect(Tile.STATE_INACTIVE)
                     openManager()
                     return@Thread
                 }
@@ -216,20 +395,43 @@ class AdGuardTileService : TileService() {
                         current = AdGuardModuleController.getProtectionState(port)
                     }
                 }
-                val target = current != true
-                val ok = AdGuardModuleController.setProtection(port, target)
-                if (ok) {
-                    Log.i("AdGuardTile", "toggle ok: port=$port target=$target")
-                    updateTile(if (target) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE)
+                if (current == null) {
+                    Log.w("AdGuardTile", "toggle aborted: unable to read current state on port=$port")
+                    updateTileDirect(Tile.STATE_INACTIVE)
+                    openManager()
+                    return@Thread
+                }
+
+                val target = !current
+                val setOk = AdGuardModuleController.setProtection(port, target)
+                val confirmedState = if (setOk) {
+                    AdGuardModuleController.getProtectionState(port)
                 } else {
-                    Log.w("AdGuardTile", "toggle failed: port=$port")
-                    updateTile(Tile.STATE_INACTIVE)
+                    null
+                }
+
+                if (setOk && confirmedState == target) {
+                    Log.i("AdGuardTile", "toggle confirmed: port=$port state=$confirmedState")
+                    updateTileDirect(if (confirmedState) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE)
+                } else {
+                    Log.w(
+                        "AdGuardTile",
+                        "toggle failed or unconfirmed: port=$port target=$target setOk=$setOk confirmed=$confirmedState"
+                    )
+                    val fallbackTileState = when (confirmedState) {
+                        true -> Tile.STATE_ACTIVE
+                        false -> Tile.STATE_INACTIVE
+                        null -> Tile.STATE_INACTIVE
+                    }
+                    updateTileDirect(fallbackTileState)
                     openManager()
                 }
             } catch (t: Throwable) {
                 Log.e("AdGuardTile", "toggle failed", t)
-                updateTile(Tile.STATE_INACTIVE)
+                updateTileDirect(Tile.STATE_INACTIVE)
                 openManager()
+            } finally {
+                toggleInFlight.set(false)
             }
         }.start()
     }
@@ -237,33 +439,51 @@ class AdGuardTileService : TileService() {
     override fun onStartListening() {
         super.onStartListening()
         listening = true
-        refreshGeneration++
-        refreshTile(0, refreshGeneration)
+        cancelPendingRetry()
+        val gen = listenGeneration.incrementAndGet()
+        refreshTile(0, gen)
     }
 
     override fun onStopListening() {
         listening = false
-        refreshGeneration++
+        listenGeneration.incrementAndGet()
+        cancelPendingRetry()
         super.onStopListening()
     }
 
+    private fun cancelPendingRetry() {
+        val r = pendingRetryRunnable
+        if (r != null) {
+            mainHandler.removeCallbacks(r)
+            pendingRetryRunnable = null
+        }
+    }
+
+    private fun isGenerationActive(generation: Int): Boolean {
+        return listening && listenGeneration.get() == generation
+    }
+
     private fun refreshTile(attempt: Int, generation: Int) {
+        if (!isGenerationActive(generation)) return
         Thread {
             try {
                 var port = AdGuardModuleController.readPort(this)
-                if (!listening || generation != refreshGeneration) return@Thread
+                if (!isGenerationActive(generation)) return@Thread
                 if (port == null) {
                     Log.w("AdGuardTile", "listening: no port (su/yaml failed), attempt=$attempt")
-                    updateTile(Tile.STATE_INACTIVE)
+                    updateTileForGeneration(Tile.STATE_INACTIVE, generation)
                     scheduleRetry(attempt, generation)
                     return@Thread
                 }
                 var enabled = AdGuardModuleController.getProtectionState(port)
+                if (!isGenerationActive(generation)) return@Thread
                 if (enabled == null) {
                     val freshPort = AdGuardModuleController.readPort(this, forceYaml = true)
+                    if (!isGenerationActive(generation)) return@Thread
                     if (freshPort != null && freshPort != port) {
                         port = freshPort
                         enabled = AdGuardModuleController.getProtectionState(port)
+                        if (!isGenerationActive(generation)) return@Thread
                     }
                 }
                 val state = when (enabled) {
@@ -272,26 +492,29 @@ class AdGuardTileService : TileService() {
                     null -> Tile.STATE_INACTIVE
                 }
                 Log.i("AdGuardTile", "listening: port=$port enabled=$enabled state=$state")
-                updateTile(state)
+                updateTileForGeneration(state, generation)
                 if (enabled == null) scheduleRetry(attempt, generation)
             } catch (t: Throwable) {
                 Log.e("AdGuardTile", "refresh failed", t)
-                updateTile(Tile.STATE_INACTIVE)
-                scheduleRetry(attempt, generation)
+                if (isGenerationActive(generation)) {
+                    updateTileForGeneration(Tile.STATE_INACTIVE, generation)
+                    scheduleRetry(attempt, generation)
+                }
             }
         }.start()
     }
 
     private fun scheduleRetry(attempt: Int, generation: Int) {
-        if (attempt >= 5) return
-        mainHandler.postDelayed(
-            {
-                if (listening && generation == refreshGeneration) {
-                    refreshTile(attempt + 1, generation)
-                }
-            },
-            3000
-        )
+        if (attempt >= 5 || !isGenerationActive(generation)) return
+        cancelPendingRetry()
+        val runnable = Runnable {
+            pendingRetryRunnable = null
+            if (isGenerationActive(generation)) {
+                refreshTile(attempt + 1, generation)
+            }
+        }
+        pendingRetryRunnable = runnable
+        mainHandler.postDelayed(runnable, 3000)
     }
 
     private fun openManager() {
@@ -310,7 +533,23 @@ class AdGuardTileService : TileService() {
         }
     }
 
-    private fun updateTile(state: Int) {
+    private fun updateTileForGeneration(state: Int, generation: Int) {
+        if (!isGenerationActive(generation)) return
+        mainHandler.post {
+            try {
+                if (!isGenerationActive(generation)) return@post
+                val tile = qsTile ?: return@post
+                tile.state = state
+                tile.label = getString(R.string.tile_label)
+                tile.icon = Icon.createWithResource(this, R.drawable.ic_tile_adguard)
+                tile.updateTile()
+            } catch (t: Throwable) {
+                Log.e("AdGuardTile", "update tile failed", t)
+            }
+        }
+    }
+
+    private fun updateTileDirect(state: Int) {
         mainHandler.post {
             try {
                 val tile = qsTile ?: return@post

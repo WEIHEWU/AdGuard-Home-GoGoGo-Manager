@@ -12,6 +12,15 @@ import 'package:adguard_home_manager/functions/time_server_disabled.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
 
 class StatusProvider with ChangeNotifier {
+  final DateTime Function() _nowProvider;
+  final Future<bool> Function()? _onExpiredRefreshOverride;
+
+  StatusProvider({
+    DateTime Function()? nowProvider,
+    Future<bool> Function()? onExpiredRefreshOverride,
+  })  : _nowProvider = nowProvider ?? DateTime.now,
+        _onExpiredRefreshOverride = onExpiredRefreshOverride;
+
   ServersProvider? _serversProvider;
 
   void update(ServersProvider? provider) {
@@ -28,7 +37,25 @@ class StatusProvider with ChangeNotifier {
   DateTime? _currentDeadline;
   Timer? _countdown;
   int _remaining = 0;
+  bool _disposed = false;
+  bool _refreshingAfterCountdown = false;
   final ValueNotifier<int> remainingTimeNotifier = ValueNotifier<int>(0);
+
+  @override
+  void notifyListeners() {
+    if (_disposed) return;
+    super.notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _countdown?.cancel();
+    _countdown = null;
+    _currentDeadline = null;
+    remainingTimeNotifier.dispose();
+    super.dispose();
+  }
 
   LoadStatus get loadStatus {
     return _loadStatus;
@@ -54,14 +81,32 @@ class StatusProvider with ChangeNotifier {
     return _currentDeadline;
   }
 
+  bool get hasActiveCountdown => _countdown != null && _countdown!.isActive;
+
+  int _computeRemainingSeconds(DateTime deadline) {
+    final diffMs = deadline.difference(_nowProvider()).inMilliseconds;
+    if (diffMs <= 0) return 0;
+    return (diffMs + 999) ~/ 1000;
+  }
+
   void setServerStatusData({
     required ServerStatus data,
   }) {
     _serverStatus = data;
-    if ((_countdown == null ||
-            (_countdown != null && _countdown!.isActive == false)) &&
-        data.disabledUntil != null) {
-      startCountdown(data.disabledUntil!);
+    final disabledUntil = data.disabledUntil;
+    if (disabledUntil != null) {
+      final remaining = _computeRemainingSeconds(disabledUntil);
+      if (remaining > 0) {
+        if (_countdown == null ||
+            !_countdown!.isActive ||
+            _currentDeadline != disabledUntil) {
+          startCountdown(disabledUntil);
+        }
+      } else {
+        stopCountdown();
+      }
+    } else {
+      stopCountdown();
     }
     notifyListeners();
   }
@@ -71,22 +116,58 @@ class StatusProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  void _triggerCountdownExpiredRefresh() {
+    if (_disposed || _refreshingAfterCountdown) return;
+    _refreshingAfterCountdown = true;
+    notifyListeners();
+    final override = _onExpiredRefreshOverride;
+    if (override != null) {
+      unawaited(
+        override().whenComplete(() {
+          _refreshingAfterCountdown = false;
+        }),
+      );
+      return;
+    }
+    if (_serversProvider?.apiClient2 == null) {
+      _refreshingAfterCountdown = false;
+      return;
+    }
+    unawaited(
+      getServerStatus().whenComplete(() {
+        _refreshingAfterCountdown = false;
+      }),
+    );
+  }
+
   void startCountdown(DateTime deadline) {
     stopCountdown();
+    if (_disposed) return;
+
+    final initialRemaining = _computeRemainingSeconds(deadline);
+    if (initialRemaining <= 0) {
+      _triggerCountdownExpiredRefresh();
+      return;
+    }
 
     _currentDeadline = deadline;
-    _remaining = deadline.difference(DateTime.now()).inSeconds + 1;
+    _remaining = initialRemaining;
     remainingTimeNotifier.value = _remaining;
 
     _countdown = Timer.periodic(
       const Duration(seconds: 1),
-      (Timer timer) async {
-        if (_remaining == 0) {
+      (Timer timer) {
+        if (_disposed || _currentDeadline == null) {
           timer.cancel();
-          notifyListeners();
-          getServerStatus();
+          _countdown = null;
+          return;
+        }
+        final nextRemaining = _computeRemainingSeconds(_currentDeadline!);
+        if (nextRemaining <= 0) {
+          stopCountdown();
+          _triggerCountdownExpiredRefresh();
         } else {
-          _remaining = _remaining - 1;
+          _remaining = nextRemaining;
           remainingTimeNotifier.value = _remaining;
         }
       },
@@ -94,12 +175,12 @@ class StatusProvider with ChangeNotifier {
   }
 
   void stopCountdown() {
-    if (_countdown != null && _countdown!.isActive) {
-      _countdown!.cancel();
-      _countdown = null;
-      _remaining = 0;
+    _countdown?.cancel();
+    _countdown = null;
+    _remaining = 0;
+    _currentDeadline = null;
+    if (!_disposed) {
       remainingTimeNotifier.value = 0;
-      _currentDeadline = null;
     }
   }
 

@@ -88,7 +88,7 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
         Provider.of<AppConfigProvider>(context, listen: false);
     final service = ModuleConfigService();
 
-    final ok = await service.switchRunMode(targetMode);
+    final switchRes = await service.switchRunModeDetailed(targetMode);
     await _syncHttpAddressIfNeeded(serversProvider, appConfigProvider, service);
     await Future.delayed(const Duration(milliseconds: 300));
     await Future.wait([
@@ -102,10 +102,20 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
     setState(() => _switchingMode = false);
     final modeLabel =
         targetMode == 'cn' ? '🇨🇳 国内模式 (CN)' : '🌐 海外模式 (Overseas)';
+    if (switchRes.unconfirmed) {
+      showSnackbar(
+        appConfigProvider: appConfigProvider,
+        label: '执行结果未确认，已同步当前实际状态',
+        color: Colors.orange,
+      );
+      return;
+    }
     showSnackbar(
       appConfigProvider: appConfigProvider,
-      label: ok ? '已成功切换至 $modeLabel' : '模式切换失败，请检查 Root 权限',
-      color: ok ? Colors.green : Colors.red,
+      label: switchRes.succeeded
+          ? '已成功切换至 $modeLabel'
+          : '模式切换失败（${switchRes.stage}），已保持原状态',
+      color: switchRes.succeeded ? Colors.green : Colors.red,
     );
   }
 
@@ -121,12 +131,20 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
         Provider.of<AppConfigProvider>(context, listen: false);
     final service = ModuleConfigService();
 
-    final repaired = await service.reloadFirewallRules();
+    final repairRes = await service.reloadFirewallRulesDetailed();
     await _syncHttpAddressIfNeeded(serversProvider, appConfigProvider, service);
-    if (serversProvider.apiClient2 != null) {
-      await serversProvider.apiClient2!.resetDnsCache();
+
+    bool sysDnsOk =
+        repairRes.capabilityConfirmed && repairRes.systemDnsFlushed;
+    if (repairRes.succeeded && !sysDnsOk) {
+      sysDnsOk = await service.flushSystemDnsCache();
     }
-    await service.flushSystemDnsCache();
+
+    bool aghDnsOk = true;
+    if (repairRes.succeeded && serversProvider.apiClient2 != null) {
+      final cacheRes = await serversProvider.apiClient2!.resetDnsCache();
+      aghDnsOk = cacheRes.successful;
+    }
 
     await Future.delayed(const Duration(milliseconds: 250));
     await Future.wait([
@@ -136,10 +154,42 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
 
     if (!mounted) return;
     setState(() => _flushing = false);
+
+    if (repairRes.unconfirmed) {
+      showSnackbar(
+        appConfigProvider: appConfigProvider,
+        label: '执行结果未确认，已刷新当前实际状态',
+        color: Colors.orange,
+      );
+      return;
+    }
+
+    final diagHealthy = _diag['running'] == true &&
+        _diag['natOk'] == true &&
+        (_diag['sniEnabled'] != true || _diag['sniOk'] == true);
+
+    if (!repairRes.succeeded || !diagHealthy) {
+      showSnackbar(
+        appConfigProvider: appConfigProvider,
+        label: '修复失败（${repairRes.stage}），请检查日志或 Root 权限',
+        color: Colors.red,
+      );
+      return;
+    }
+
+    if (!sysDnsOk || !aghDnsOk) {
+      showSnackbar(
+        appConfigProvider: appConfigProvider,
+        label: '转发规则已恢复，但部分 DNS 缓存刷新未完成',
+        color: Colors.orange,
+      );
+      return;
+    }
+
     showSnackbar(
       appConfigProvider: appConfigProvider,
-      label: repaired ? '已修复并刷新 DNS 缓存与转发规则' : '操作失败，请检查 Root 权限',
-      color: repaired ? Colors.green : Colors.red,
+      label: '已修复并刷新 DNS 缓存与转发规则',
+      color: Colors.green,
     );
   }
 
@@ -473,6 +523,7 @@ class _FalsePositiveAssistantModalState
   bool _searchingRules = false;
   List<Map<String, String>> _ruleMatches = [];
   Timer? _searchDebounce;
+  late final RuleSearchCoordinator _ruleSearchCoordinator;
 
   // Tab 1 (网页排错) 状态
   final TextEditingController _urlController = TextEditingController();
@@ -504,6 +555,19 @@ class _FalsePositiveAssistantModalState
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _ruleSearchCoordinator = RuleSearchCoordinator(
+      executor: (keyword) => ModuleConfigService().searchFilterRules(keyword),
+      onResult: (generation, keyword, matches, stillSearching) {
+        if (!mounted ||
+            generation != _ruleSearchCoordinator.requestGeneration) {
+          return;
+        }
+        setState(() {
+          _ruleMatches = matches;
+          _searchingRules = stillSearching;
+        });
+      },
+    );
     _fetchRecentBlocked();
     _searchController.addListener(_onSearchChanged);
     _appSearchController.addListener(() {
@@ -518,6 +582,7 @@ class _FalsePositiveAssistantModalState
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _searchDebounce?.cancel();
+    _ruleSearchCoordinator.dispose();
     _searchController.dispose();
     _urlController.dispose();
     _appSearchController.dispose();
@@ -536,28 +601,22 @@ class _FalsePositiveAssistantModalState
   void _onSearchChanged() {
     final q = _searchController.text.trim().toLowerCase();
     if (q == _searchQuery) return;
-    setState(() {
-      _searchQuery = q;
-      if (q.length < 2) {
+    _searchDebounce?.cancel();
+    if (q.length < 2) {
+      _ruleSearchCoordinator.invalidatePending();
+      setState(() {
+        _searchQuery = q;
         _ruleMatches = [];
         _searchingRules = false;
-      }
-    });
-    _searchDebounce?.cancel();
-    if (q.length >= 2) {
-      setState(() => _searchingRules = true);
-      _searchDebounce = Timer(const Duration(milliseconds: 300), () {
-        _runRuleSearch(q);
       });
+      return;
     }
-  }
-
-  Future<void> _runRuleSearch(String keyword) async {
-    final matches = await ModuleConfigService().searchFilterRules(keyword);
-    if (!mounted || _searchQuery != keyword) return;
     setState(() {
-      _ruleMatches = matches;
-      _searchingRules = false;
+      _searchQuery = q;
+      _searchingRules = true;
+    });
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      _ruleSearchCoordinator.submitSearch(q);
     });
   }
 
@@ -833,8 +892,13 @@ class _FalsePositiveAssistantModalState
       updated.remove(pkg);
     }
 
-    final ok = await service.saveAppAllowlist(updated.toList());
-    await service.flushSystemDnsCache();
+    final reloadRes = await service.saveAppAllowlistDetailed(updated.toList());
+    final ok = reloadRes.succeeded;
+    bool dnsOk =
+        reloadRes.capabilityConfirmed && reloadRes.systemDnsFlushed;
+    if (ok && !dnsOk) {
+      dnsOk = await service.flushSystemDnsCache();
+    }
 
     if (!mounted) return;
     setState(() {
@@ -847,9 +911,11 @@ class _FalsePositiveAssistantModalState
     showSnackbar(
       appConfigProvider: appConfigProvider,
       label: ok
-          ? (adding ? '已将「$name」加入应用白名单并刷新网络' : '已将「$name」移出应用白名单')
+          ? (dnsOk
+              ? (adding ? '已将「$name」加入应用白名单并刷新网络' : '已将「$name」移出应用白名单')
+              : (adding ? '已将「$name」加入应用白名单（DNS 缓存刷新未确认）' : '已将「$name」移出应用白名单（DNS 缓存刷新未确认）'))
           : '操作失败，请重试',
-      color: ok ? Colors.green : Colors.red,
+      color: ok ? (dnsOk ? Colors.green : Colors.orange) : Colors.red,
     );
   }
 

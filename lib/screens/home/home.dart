@@ -18,6 +18,8 @@ class Home extends StatefulWidget {
 }
 
 class _HomeState extends State<Home> {
+  bool _retryingSync = false;
+
   @override
   void initState() {
     super.initState();
@@ -140,22 +142,31 @@ class _HomeState extends State<Home> {
                     FilledButton.icon(
                       icon: const Icon(Icons.refresh_rounded),
                       label: const Text('重新同步端口并重试'),
-                      onPressed: () async {
-                        final service = ModuleConfigService();
-                        final serversProvider = Provider.of<ServersProvider>(
-                            context,
-                            listen: false);
-                        final appConfigProvider =
-                            Provider.of<AppConfigProvider>(context,
-                                listen: false);
-                        await service.reloadFirewallRules();
-                        final addr = await service.readHttpAddress();
-                        if (addr != null && addr.isNotEmpty) {
-                          appConfigProvider.setModuleHttpAddress(addr);
-                          await serversProvider.autoConnectModule(addr);
-                        }
-                        await statusProvider.getServerStatus();
-                      },
+                      onPressed: _retryingSync
+                          ? null
+                          : () async {
+                              setState(() => _retryingSync = true);
+                              try {
+                                final service = ModuleConfigService();
+                                final serversProvider =
+                                    Provider.of<ServersProvider>(context,
+                                        listen: false);
+                                final appConfigProvider =
+                                    Provider.of<AppConfigProvider>(context,
+                                        listen: false);
+                                await service.reloadFirewallRules();
+                                final addr = await service.readHttpAddress();
+                                if (addr != null && addr.isNotEmpty) {
+                                  appConfigProvider.setModuleHttpAddress(addr);
+                                  await serversProvider.autoConnectModule(addr);
+                                }
+                                await statusProvider.getServerStatus();
+                              } finally {
+                                if (mounted) {
+                                  setState(() => _retryingSync = false);
+                                }
+                              }
+                            },
                     ),
                   ],
                 ),

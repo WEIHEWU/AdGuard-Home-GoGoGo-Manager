@@ -125,6 +125,7 @@ class _SettingsWidgetState extends State<Settings> {
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.5),
       builder: (ctx) {
+        bool reloading = false;
         return StatefulBuilder(
           builder: (ctx, setModalState) {
             return AlertDialog(
@@ -181,26 +182,53 @@ class _SettingsWidgetState extends State<Settings> {
               ),
               actions: [
                 TextButton(
-                  onPressed: () async {
-                    final ok = await service.reloadFirewallRules();
-                    await Future.delayed(const Duration(seconds: 2));
-                    await _loadDiagnostics(forceRefresh: true);
-                    logs = await service.readModuleLogs(maxLines: 150);
-                    setModalState(() {});
-                    if (mounted) {
-                      showSnackbar(
-                        appConfigProvider: appConfigProvider,
-                        label: ok
-                            ? (isZh
-                                ? '已触发防火墙与守护规则重载'
-                                : 'Firewall & daemon rules reloaded')
-                            : (isZh
-                                ? '重载失败，请检查 Root 权限'
-                                : 'Reload failed, please check Root access'),
-                        color: ok ? Colors.green : Colors.red,
-                      );
-                    }
-                  },
+                  onPressed: reloading
+                      ? null
+                      : () async {
+                          setModalState(() => reloading = true);
+                          try {
+                            final reloadRes =
+                                await service.reloadFirewallRulesDetailed();
+                            await Future.delayed(const Duration(seconds: 1));
+                            await _loadDiagnostics(forceRefresh: true);
+                            logs = await service.readModuleLogs(maxLines: 150);
+                            if (ctx.mounted) {
+                              setModalState(() => reloading = false);
+                            }
+                            if (mounted) {
+                              if (reloadRes.unconfirmed) {
+                                showSnackbar(
+                                  appConfigProvider: appConfigProvider,
+                                  label: isZh
+                                      ? '执行结果未确认，已同步当前实际状态'
+                                      : 'Result unconfirmed, status refreshed',
+                                  color: Colors.orange,
+                                );
+                              } else {
+                                final diagHealthy = _diag['running'] == true &&
+                                    _diag['natOk'] == true &&
+                                    (_diag['sniEnabled'] != true ||
+                                        _diag['sniOk'] == true);
+                                final ok = reloadRes.succeeded && diagHealthy;
+                                showSnackbar(
+                                  appConfigProvider: appConfigProvider,
+                                  label: ok
+                                      ? (isZh
+                                          ? '已验证防火墙与守护规则重载生效'
+                                          : 'Firewall & daemon rules reloaded and verified')
+                                      : (isZh
+                                          ? '重载失败（${reloadRes.stage}），请查看上方日志'
+                                          : 'Reload failed (${reloadRes.stage}), check logs'),
+                                  color: ok ? Colors.green : Colors.red,
+                                );
+                              }
+                            }
+                          } catch (_) {
+                            if (ctx.mounted) {
+                              setModalState(() => reloading = false);
+                            }
+                          }
+                        },
                   child: Text(isZh ? '重载防火墙规则' : 'Reload Firewall'),
                 ),
                 TextButton(

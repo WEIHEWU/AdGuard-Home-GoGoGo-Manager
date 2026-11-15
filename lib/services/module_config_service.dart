@@ -1,13 +1,252 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+
+typedef SuProcessRunner = Future<ProcessResult> Function(
+  String executable,
+  List<String> arguments,
+);
+
+typedef SuProbeCandidateRunner = Future<ProcessResult?> Function(
+  String executable,
+  Duration timeout,
+);
+
+/// 结构化防火墙重载/自愈修复结果
+class FirewallReloadResult {
+  final bool succeeded;
+  final bool unconfirmed;
+  final String branch;
+  final String stage;
+  final bool systemDnsFlushed;
+  final bool capabilityConfirmed;
+  final String message;
+
+  const FirewallReloadResult({
+    required this.succeeded,
+    this.unconfirmed = false,
+    this.branch = 'unknown',
+    this.stage = 'unknown',
+    this.systemDnsFlushed = false,
+    this.capabilityConfirmed = false,
+    this.message = '',
+  });
+
+  factory FirewallReloadResult.fromScriptOutput({
+    required int exitCode,
+    required String stdoutText,
+  }) {
+    for (final rawLine in stdoutText.split('\n').reversed) {
+      final line = rawLine.trim();
+      if (!line.startsWith('AGH_REPAIR_RESULT ')) continue;
+      final fields = <String, String>{};
+      for (final token in line.substring('AGH_REPAIR_RESULT '.length).split(' ')) {
+        final eq = token.indexOf('=');
+        if (eq > 0) {
+          fields[token.substring(0, eq).trim()] = token.substring(eq + 1).trim();
+        }
+      }
+      final status = fields['status'] ?? '';
+      final stage = fields['stage'] ?? 'unknown';
+      final branch = fields['branch'] ?? 'unknown';
+      final dnsFlushed = fields['dns_flushed'] == '1';
+      final ok = exitCode == 0 && status == 'ok';
+      return FirewallReloadResult(
+        succeeded: ok,
+        unconfirmed: status == 'pending',
+        branch: branch,
+        stage: stage,
+        systemDnsFlushed: dnsFlushed,
+        capabilityConfirmed: true,
+        message: ok
+            ? '已修复并验证规则生效'
+            : (status == 'pending' ? '停止请求已记录，当前操作尚未结束' : '修复失败 ($stage)'),
+      );
+    }
+    final ok = exitCode == 0;
+    return FirewallReloadResult(
+      succeeded: ok,
+      unconfirmed: false,
+      branch: 'legacy_unconfirmed',
+      stage: ok ? 'completed' : 'failed',
+      systemDnsFlushed: false,
+      capabilityConfirmed: false,
+      message: ok ? '操作已执行' : '操作失败',
+    );
+  }
+}
+
+/// 结构化运行模式切换结果
+class ModeSwitchResult {
+  final bool succeeded;
+  final bool unconfirmed;
+  final String stage;
+  final String mode;
+  final String targetMode;
+  final String message;
+
+  const ModeSwitchResult({
+    required this.succeeded,
+    this.unconfirmed = false,
+    this.stage = 'unknown',
+    this.mode = 'overseas',
+    String? targetMode,
+    this.message = '',
+  }) : targetMode = targetMode ?? mode;
+
+  factory ModeSwitchResult.fromScriptOutput({
+    required int exitCode,
+    required String stdoutText,
+    required String targetMode,
+  }) {
+    for (final rawLine in stdoutText.split('\n').reversed) {
+      final line = rawLine.trim();
+      if (!line.startsWith('AGH_SWITCH_RESULT ')) continue;
+      final fields = <String, String>{};
+      for (final token in line.substring('AGH_SWITCH_RESULT '.length).split(' ')) {
+        final eq = token.indexOf('=');
+        if (eq > 0) {
+          fields[token.substring(0, eq).trim()] = token.substring(eq + 1).trim();
+        }
+      }
+      final status = fields['status'] ?? '';
+      final stage = fields['stage'] ?? 'unknown';
+      final mode = fields['mode'] ?? targetMode;
+      final ok = exitCode == 0 && status == 'ok';
+      return ModeSwitchResult(
+        succeeded: ok,
+        unconfirmed: false,
+        stage: stage,
+        mode: mode,
+        targetMode: targetMode,
+        message: ok ? '已成功切换模式' : '模式切换失败 ($stage)',
+      );
+    }
+    final ok = exitCode == 0;
+    return ModeSwitchResult(
+      succeeded: ok,
+      unconfirmed: false,
+      stage: ok ? 'completed' : 'failed',
+      mode: targetMode,
+      targetMode: targetMode,
+      message: ok ? '已成功切换模式' : '模式切换失败',
+    );
+  }
+}
+
+class _ModeSwitchQueueEntry {
+  final String targetMode;
+  final Future<ModeSwitchResult> Function() executor;
+  final Completer<ModeSwitchResult> completer = Completer<ModeSwitchResult>();
+  bool started = false;
+
+  _ModeSwitchQueueEntry({
+    required this.targetMode,
+    required this.executor,
+  });
+}
+
+/// 规则搜索单飞与最新待执行队列协调器：
+/// - 保证同一时间最多只有 1 个底层规则扫描在执行 (`searchInFlight`)
+/// - 扫描期间到达的新请求仅覆盖 `latestPendingRequest`，不并发派生 `su grep`
+/// - 按递增 `requestGeneration` 校验回填结果，彻底杜绝 `A -> B -> A` 时旧的 `A` 覆盖新的 `A`
+class RuleSearchCoordinator {
+  final Future<List<Map<String, String>>> Function(String keyword) _executor;
+  final Duration taskTimeout;
+  final void Function(
+    int generation,
+    String keyword,
+    List<Map<String, String>> matches,
+    bool stillSearching,
+  )? onResult;
+
+  bool searchInFlight = false;
+  ({String keyword, int generation})? latestPendingRequest;
+  int requestGeneration = 0;
+  bool _disposed = false;
+
+  RuleSearchCoordinator({
+    required Future<List<Map<String, String>>> Function(String keyword) executor,
+    this.taskTimeout = const Duration(seconds: 8),
+    this.onResult,
+  }) : _executor = executor;
+
+  bool get isDisposed => _disposed;
+
+  /// 当输入清空或少于最小长度时调用：清空待执行队列并递增代数，使在途旧结果全部失效
+  int invalidatePending() {
+    latestPendingRequest = null;
+    return ++requestGeneration;
+  }
+
+  /// 提交一次防抖后的规则检索请求
+  Future<void> submitSearch(String keyword) async {
+    if (_disposed) return;
+    final gen = ++requestGeneration;
+    final req = (keyword: keyword, generation: gen);
+    if (searchInFlight) {
+      latestPendingRequest = req;
+      return;
+    }
+    await _drainQueue(req);
+  }
+
+  Future<void> _drainQueue(({String keyword, int generation}) initialReq) async {
+    searchInFlight = true;
+    var current = initialReq;
+    try {
+      while (!_disposed) {
+        List<Map<String, String>> matches = const [];
+        try {
+          matches = await _executor(current.keyword).timeout(
+            taskTimeout,
+            onTimeout: () => <Map<String, String>>[],
+          );
+        } catch (_) {
+          matches = const [];
+        }
+        if (_disposed) break;
+
+        final pending = latestPendingRequest;
+        if (pending != null) {
+          latestPendingRequest = null;
+          current = pending;
+          continue;
+        }
+
+        if (current.generation == requestGeneration) {
+          onResult?.call(current.generation, current.keyword, matches, false);
+        }
+        break;
+      }
+    } finally {
+      searchInFlight = false;
+    }
+  }
+
+  void dispose() {
+    _disposed = true;
+    latestPendingRequest = null;
+    requestGeneration++;
+  }
+}
 
 class ModuleConfigService {
   static const String moduleConfigPath = '/data/adb/agh/scripts/config.prop';
   static const String moduleYamlPath = '/data/adb/agh/bin/AdGuardHome.yaml';
   static const MethodChannel _installedAppsChannel =
       MethodChannel('com.wu.adgogogo/installed_apps');
+
+  static const List<String> _suCandidates = <String>[
+    'su',
+    '/sbin/su',
+    '/system/bin/su',
+    '/system/xbin/su',
+    '/debug_ramdisk/su',
+  ];
 
   static Map<String, dynamic>? _cachedDiag;
   static DateTime? _cachedDiagTime;
@@ -16,45 +255,231 @@ class ModuleConfigService {
   static List<Map<String, dynamic>>? _cachedApps;
   static DateTime? _cachedAppsTime;
   static String? _cachedSuBin;
+  static Future<String?>? _inFlightSuProbe;
+  static Future<FirewallReloadResult>? _inFlightRepairOp;
+  static final List<_ModeSwitchQueueEntry> _modeSwitchQueue =
+      <_ModeSwitchQueueEntry>[];
+  static bool _drainingModeSwitchQueue = false;
 
-  bool get _isAndroid => Platform.isAndroid;
+  final SuProcessRunner _processRunner;
+  final SuProbeCandidateRunner? _probeCandidateRunner;
+  final Duration _suProbeTimeout;
+  final Duration _mutationWaitTimeout;
+  final bool? _isAndroidOverride;
+
+  ModuleConfigService({
+    SuProcessRunner? processRunner,
+    SuProbeCandidateRunner? probeCandidateRunner,
+    Duration suProbeTimeout = const Duration(seconds: 3),
+    Duration mutationWaitTimeout = const Duration(seconds: 25),
+    bool? isAndroidOverride,
+  })  : _processRunner = processRunner ?? Process.run,
+        _probeCandidateRunner = probeCandidateRunner,
+        _suProbeTimeout = suProbeTimeout,
+        _mutationWaitTimeout = mutationWaitTimeout,
+        _isAndroidOverride = isAndroidOverride;
+
+  bool get _isAndroid => _isAndroidOverride ?? Platform.isAndroid;
+
+  @visibleForTesting
+  static void resetTestState() {
+    _cachedDiag = null;
+    _cachedDiagTime = null;
+    _cachedProxyUrl = null;
+    _cachedProxyUrlTime = null;
+    _cachedApps = null;
+    _cachedAppsTime = null;
+    _cachedSuBin = null;
+    _inFlightSuProbe = null;
+    _inFlightRepairOp = null;
+    _modeSwitchQueue.clear();
+    _drainingModeSwitchQueue = false;
+  }
 
   static const String _pathPrefix =
       'export PATH="/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:\$PATH"; ';
 
-  Future<ProcessResult> _runSu(String command) async {
-    const defaultCandidates = <String>[
-      'su',
-      '/sbin/su',
-      '/system/bin/su',
-      '/system/xbin/su',
-      '/debug_ramdisk/su',
-    ];
-    final first = _cachedSuBin;
-    final candidates = first != null
-        ? <String>[first, ...defaultCandidates.where((e) => e != first)]
-        : defaultCandidates;
-    ProcessResult? lastResult;
-    for (final su in candidates) {
+  /// 使用可控 Process.start 执行只读 su 探测，并发消费 stdout/stderr 并在超时后终止且回收子进程
+  static Future<ProcessResult?> defaultSuProbeCandidate(
+    String su,
+    Duration timeout,
+  ) async {
+    Process? process;
+    try {
+      process = await Process.start(su, const ['-c', 'id -u']);
+    } catch (_) {
+      return null;
+    }
+
+    final stdoutBuffer = StringBuffer();
+    final stdoutDone = process.stdout
+        .transform(utf8.decoder)
+        .listen(
+          (chunk) {
+            if (stdoutBuffer.length < 256) {
+              stdoutBuffer.write(chunk);
+            }
+          },
+          onError: (_) {},
+        )
+        .asFuture<void>()
+        .catchError((_) {});
+    final stderrDone = process.stderr.drain<void>().catchError((_) {});
+
+    int exitCode;
+    try {
+      exitCode = await process.exitCode.timeout(timeout);
+    } on TimeoutException {
       try {
-        final result = await Process.run(su, ['-c', '$_pathPrefix$command']);
-        lastResult = result;
-        if (result.exitCode == 0) {
-          _cachedSuBin = su;
-          return result;
+        process.kill(ProcessSignal.sigterm);
+      } catch (_) {}
+      try {
+        exitCode = await process.exitCode.timeout(
+          const Duration(milliseconds: 200),
+        );
+      } on TimeoutException {
+        try {
+          process.kill(ProcessSignal.sigkill);
+        } catch (_) {}
+        try {
+          exitCode = await process.exitCode.timeout(
+            const Duration(milliseconds: 500),
+          );
+        } catch (_) {
+          exitCode = -1;
         }
+      }
+      await Future.wait([stdoutDone, stderrDone]).timeout(
+        const Duration(milliseconds: 100),
+        onTimeout: () => const <void>[],
+      );
+      return null;
+    } catch (_) {
+      return null;
+    }
+
+    await Future.wait([stdoutDone, stderrDone]).timeout(
+      const Duration(milliseconds: 200),
+      onTimeout: () => const <void>[],
+    );
+    return ProcessResult(process.pid, exitCode, stdoutBuffer.toString(), '');
+  }
+
+  Future<ProcessResult?> _runSingleSuProbe(String su) async {
+    final probeRunner = _probeCandidateRunner;
+    if (probeRunner != null) {
+      return probeRunner(su, _suProbeTimeout);
+    }
+    if (!identical(_processRunner, Process.run)) {
+      try {
+        return await _processRunner(su, const ['-c', 'id -u'])
+            .timeout(_suProbeTimeout);
+      } on TimeoutException {
+        return null;
       } catch (_) {
-        // Try next su candidate
+        return null;
       }
     }
-    return lastResult ?? ProcessResult(0, 1, '', 'su unavailable');
+    return defaultSuProbeCandidate(su, _suProbeTimeout);
+  }
+
+  Future<String?> _resolveSuBin({
+    bool forceRefresh = false,
+    String? excludeSu,
+  }) async {
+    if (!forceRefresh &&
+        _cachedSuBin != null &&
+        _cachedSuBin != excludeSu) {
+      return _cachedSuBin;
+    }
+
+    // 无论是否 forceRefresh，只要已有在途探测任务则先复用等待，绝不并发启动多个 su 探测
+    while (_inFlightSuProbe != null) {
+      final existing = _inFlightSuProbe;
+      if (existing == null) break;
+      final existingResult = await existing;
+      if (!forceRefresh &&
+          existingResult != null &&
+          existingResult != excludeSu) {
+        return existingResult;
+      }
+      if (forceRefresh &&
+          existingResult != null &&
+          existingResult != excludeSu &&
+          _cachedSuBin == existingResult) {
+        return existingResult;
+      }
+      if (identical(_inFlightSuProbe, existing)) {
+        break;
+      }
+    }
+
+    if (forceRefresh) {
+      _cachedSuBin = null;
+    }
+
+    final probeFuture = _probeSuBin(excludeSu: excludeSu);
+    _inFlightSuProbe = probeFuture;
+    try {
+      return await probeFuture;
+    } finally {
+      if (identical(_inFlightSuProbe, probeFuture)) {
+        _inFlightSuProbe = null;
+      }
+    }
+  }
+
+  Future<String?> _probeSuBin({String? excludeSu}) async {
+    final first = _cachedSuBin;
+    final ordered = first != null
+        ? <String>[first, ..._suCandidates.where((e) => e != first)]
+        : _suCandidates;
+    for (final su in ordered) {
+      if (excludeSu != null && su == excludeSu) continue;
+      try {
+        final probe = await _runSingleSuProbe(su);
+        if (probe != null &&
+            probe.exitCode == 0 &&
+            probe.stdout.toString().trim().split('\n').first.trim() == '0') {
+          _cachedSuBin = su;
+          return su;
+        }
+      } catch (_) {
+        // Candidate binary unavailable; try next candidate
+      }
+    }
+    _cachedSuBin = null;
+    return null;
+  }
+
+  Future<ProcessResult> _runSu(String command) async {
+    var su = await _resolveSuBin();
+    if (su == null) {
+      return ProcessResult(0, 1, '', 'su unavailable');
+    }
+    try {
+      return await _processRunner(su, ['-c', '$_pathPrefix$command']);
+    } catch (_) {
+      // Cached su binary could not be launched (e.g. path removed); re-probe once.
+      final failedSu = su;
+      _cachedSuBin = null;
+      su = await _resolveSuBin(forceRefresh: true, excludeSu: failedSu);
+      if (su == null) {
+        return ProcessResult(0, 1, '', 'su unavailable');
+      }
+      try {
+        return await _processRunner(su, ['-c', '$_pathPrefix$command']);
+      } catch (e) {
+        return ProcessResult(0, 1, '', e.toString());
+      }
+    }
   }
 
   Future<bool> hasRoot() async {
     if (!_isAndroid) return false;
     try {
-      final result = await _runSu('id');
-      return result.stdout.toString().contains('uid=0');
+      final su = await _resolveSuBin();
+      return su != null;
     } catch (_) {
       return false;
     }
@@ -112,7 +537,7 @@ class ModuleConfigService {
       return _cachedProxyUrl!;
     }
     try {
-      final result = await Process.run('su', ['-c', 'cat $moduleConfigPath']);
+      final result = await _runSu('cat $moduleConfigPath');
       if (result.exitCode != 0) {
         return '';
       }
@@ -126,8 +551,6 @@ class ModuleConfigService {
         _cachedProxyUrlTime = DateTime.now();
         return '';
       }
-      // 模块配置默认写入 PROXY_URL=" "（引号内一个空格）作为占位，
-      // 去掉引号后再 trim，空白值统一按“未设置”处理，不显示到输入框。
       final parsed = line
           .substring(line.indexOf('PROXY_URL=') + 'PROXY_URL='.length)
           .replaceAll('"', '')
@@ -144,8 +567,7 @@ class ModuleConfigService {
   Future<bool> saveProxyUrl(String proxyUrl) async {
     if (!_isAndroid) return false;
     try {
-      final readResult =
-          await Process.run('su', ['-c', 'cat $moduleConfigPath']);
+      final readResult = await _runSu('cat $moduleConfigPath');
       if (readResult.exitCode != 0) return false;
 
       final value = proxyUrl.trim();
@@ -156,7 +578,6 @@ class ModuleConfigService {
       for (final line in lines) {
         if (line.trimLeft().startsWith('PROXY_URL=')) {
           replaced = true;
-          // 空值时保留模块原有的空格占位，避免变量缺失导致模块脚本报错。
           updatedLines
               .add(value.isNotEmpty ? 'PROXY_URL="$value"' : 'PROXY_URL=" "');
           continue;
@@ -168,18 +589,18 @@ class ModuleConfigService {
             .add(value.isNotEmpty ? 'PROXY_URL="$value"' : 'PROXY_URL=" "');
       }
       final content = updatedLines.join('\n');
+      final escaped = content.replaceAll("'", "'\\''");
 
-      final writer =
-          await Process.start('su', ['-c', 'cat > $moduleConfigPath']);
-      writer.stdin.add(utf8.encode(content));
-      await writer.stdin.close();
-      final writeResult = await writer.exitCode;
-      if (writeResult == 0) {
+      final writeResult = await _runSu(
+        "printf '%s' '$escaped' > $moduleConfigPath && "
+        "{ sh /data/adb/agh/scripts/ProxyConfig.sh --once >/dev/null 2>&1 & }",
+      );
+      if (writeResult.exitCode == 0) {
         _cachedProxyUrl = value;
         _cachedProxyUrlTime = DateTime.now();
-        Process.run('su', ['-c', 'sh /data/adb/agh/scripts/ProxyConfig.sh --once >/dev/null 2>&1 &']);
+        return true;
       }
-      return writeResult == 0;
+      return false;
     } catch (_) {
       return false;
     }
@@ -342,20 +763,103 @@ echo "ALLOW=\$allow_cnt"
     }
   }
 
-  Future<bool> switchRunMode(String targetMode) async {
-    if (!_isAndroid) return false;
+  /// 结构化模式切换：
+  /// - 相同目标的并发切换可共享同一个任务 Future
+  /// - 不同目标不得共享同一个操作结果，按请求顺序排队串行执行，确保最终完成的模式与最后一个有效用户请求一致
+  /// - 若等待超时则标记为 unconfirmed，且在底层进程真正结束前不释放互斥、不并发启动下一项修改
+  Future<ModeSwitchResult> switchRunModeDetailed(String targetMode) async {
     final normalized =
         targetMode.trim().toLowerCase() == 'cn' ? 'cn' : 'overseas';
+    if (!_isAndroid) {
+      return ModeSwitchResult(
+        succeeded: false,
+        stage: 'not_android',
+        mode: normalized,
+        targetMode: normalized,
+        message: '当前非 Android 环境',
+      );
+    }
+
+    _ModeSwitchQueueEntry entry;
+    if (_modeSwitchQueue.isNotEmpty &&
+        _modeSwitchQueue.last.targetMode == normalized) {
+      entry = _modeSwitchQueue.last;
+    } else {
+      entry = _ModeSwitchQueueEntry(
+        targetMode: normalized,
+        executor: () => _performSwitchRunMode(normalized),
+      );
+      _modeSwitchQueue.add(entry);
+      if (!_drainingModeSwitchQueue) {
+        unawaited(_drainModeSwitchQueue());
+      }
+    }
+
+    try {
+      return await entry.completer.future.timeout(_mutationWaitTimeout);
+    } on TimeoutException {
+      _cachedDiag = null;
+      _cachedDiagTime = null;
+      return ModeSwitchResult(
+        succeeded: false,
+        unconfirmed: true,
+        stage: 'timeout_unconfirmed',
+        mode: normalized,
+        targetMode: normalized,
+        message: '执行结果未确认',
+      );
+    }
+  }
+
+  Future<void> _drainModeSwitchQueue() async {
+    if (_drainingModeSwitchQueue) return;
+    _drainingModeSwitchQueue = true;
+    try {
+      while (_modeSwitchQueue.isNotEmpty) {
+        final current = _modeSwitchQueue.first;
+        current.started = true;
+        final result = await current.executor();
+        if (_modeSwitchQueue.isNotEmpty &&
+            identical(_modeSwitchQueue.first, current)) {
+          _modeSwitchQueue.removeAt(0);
+        } else {
+          _modeSwitchQueue.remove(current);
+        }
+        if (!current.completer.isCompleted) {
+          current.completer.complete(result);
+        }
+      }
+    } finally {
+      _drainingModeSwitchQueue = false;
+    }
+  }
+
+  Future<bool> switchRunMode(String targetMode) async {
+    final res = await switchRunModeDetailed(targetMode);
+    return res.succeeded;
+  }
+
+  Future<ModeSwitchResult> _performSwitchRunMode(String normalized) async {
     try {
       final result = await _runSu(
         'rm -f /dev/shm/agh_manual_stop /data/adb/agh/run/agh_manual_stop /data/adb/agh/manual_stop /data/adb/agh/stopped /data/adb/agh/app_pause_active 2>/dev/null; '
-        '/system/bin/sh /data/adb/agh/scripts/switch_mode.sh $normalized >/dev/null 2>&1',
+        '/system/bin/sh /data/adb/agh/scripts/switch_mode.sh $normalized 2>&1',
       );
       _cachedDiag = null;
       _cachedDiagTime = null;
-      return result.exitCode == 0;
+      return ModeSwitchResult.fromScriptOutput(
+        exitCode: result.exitCode,
+        stdoutText: result.stdout.toString(),
+        targetMode: normalized,
+      );
     } catch (_) {
-      return false;
+      return ModeSwitchResult(
+        succeeded: false,
+        stage: 'exception',
+        mode: normalized,
+        targetMode: normalized,
+        message: '模式切换异常',
+      );
     }
   }
 
@@ -382,32 +886,92 @@ echo "ALLOW=\$allow_cnt"
     }
   }
 
+  /// 结构化防火墙规则修复/重载：
+  /// - 返回是否成功、实际执行分支、是否已确认完成系统 DNS 缓存刷新
+  /// - 若等待超时则标记为 unconfirmed，且在底层脚本进程真正退出前保持在途互斥，不允许重复触发同类修改
+  Future<FirewallReloadResult> reloadFirewallRulesDetailed() async {
+    if (!_isAndroid) {
+      return const FirewallReloadResult(
+        succeeded: false,
+        branch: 'not_android',
+        stage: 'not_android',
+        message: '当前非 Android 环境',
+      );
+    }
+    var activeFuture = _inFlightRepairOp;
+    if (activeFuture == null) {
+      final started = _performReloadFirewallRules();
+      _inFlightRepairOp = started;
+      started.whenComplete(() {
+        if (identical(_inFlightRepairOp, started)) {
+          _inFlightRepairOp = null;
+        }
+      });
+      activeFuture = started;
+    }
+
+    try {
+      return await activeFuture.timeout(_mutationWaitTimeout);
+    } on TimeoutException {
+      _cachedDiag = null;
+      _cachedDiagTime = null;
+      return const FirewallReloadResult(
+        succeeded: false,
+        unconfirmed: true,
+        branch: 'timeout',
+        stage: 'timeout_unconfirmed',
+        systemDnsFlushed: false,
+        capabilityConfirmed: false,
+        message: '执行结果未确认',
+      );
+    }
+  }
+
   Future<bool> reloadFirewallRules() async {
-    if (!_isAndroid) return false;
+    final res = await reloadFirewallRulesDetailed();
+    return res.succeeded;
+  }
+
+  Future<FirewallReloadResult> _performReloadFirewallRules() async {
     try {
       final result = await _runSu(
         'rm -f /dev/shm/agh_manual_stop /data/adb/agh/run/agh_manual_stop /data/adb/agh/manual_stop /data/adb/agh/stopped /data/adb/agh/app_pause_active 2>/dev/null; '
         'if [ -f /data/adb/modules/AdGuardHome/service.sh ]; then '
-        '  /system/bin/sh /data/adb/modules/AdGuardHome/service.sh --repair >/dev/null 2>&1; '
+        '  /system/bin/sh /data/adb/modules/AdGuardHome/service.sh --repair 2>&1; '
         'else '
-        '  /system/bin/sh /data/adb/agh/scripts/iptables.sh --reload >/dev/null 2>&1; '
+        '  /system/bin/sh /data/adb/agh/scripts/iptables.sh --reload 2>&1; '
         'fi',
       );
       _cachedDiag = null;
       _cachedDiagTime = null;
-      return result.exitCode == 0;
+      return FirewallReloadResult.fromScriptOutput(
+        exitCode: result.exitCode,
+        stdoutText: result.stdout.toString(),
+      );
     } catch (_) {
-      return false;
+      return const FirewallReloadResult(
+        succeeded: false,
+        branch: 'exception',
+        stage: 'exception',
+        message: '操作执行异常',
+      );
     }
   }
 
+  /// 检查真实退出码的系统 DNS 缓存刷新（至少一条 resolver 刷新命令返回 0 才算成功）
   Future<bool> flushSystemDnsCache() async {
     if (!_isAndroid) return false;
     try {
       final result = await _runSu(
-        'ndc resolver flushenv >/dev/null 2>&1 || true; '
-        'ndc resolver flushdefaultif >/dev/null 2>&1 || true; '
-        'cmd netd resolver flushdefaultif >/dev/null 2>&1 || true',
+        'flushed=0; '
+        'if command -v ndc >/dev/null 2>&1; then '
+        '  ndc resolver flushenv >/dev/null 2>&1 && flushed=1; '
+        '  ndc resolver flushdefaultif >/dev/null 2>&1 && flushed=1; '
+        'fi; '
+        'if command -v cmd >/dev/null 2>&1; then '
+        '  cmd netd resolver flushdefaultif >/dev/null 2>&1 && flushed=1; '
+        'fi; '
+        '[ "\$flushed" -eq 1 ]',
       );
       return result.exitCode == 0;
     } catch (_) {
@@ -418,12 +982,13 @@ echo "ALLOW=\$allow_cnt"
   Future<bool> cleanAppAdCaches() async {
     if (!_isAndroid) return false;
     try {
-      final result = await Process.run(
-        'su',
-        [
-          '-c',
-          'rm -f /data/adb/agh/last_clean_time && rmdir /data/adb/agh/cache_clean.lock 2>/dev/null; if grep -q -- "--daemon" /data/adb/agh/scripts/NoAdsService.sh 2>/dev/null; then sh /data/adb/agh/scripts/NoAdsService.sh --once >/dev/null 2>&1; else sh /data/adb/agh/scripts/NoAdsService.sh >/dev/null 2>&1 & fi'
-        ],
+      final result = await _runSu(
+        'rm -f /data/adb/agh/last_clean_time && rmdir /data/adb/agh/cache_clean.lock 2>/dev/null; '
+        'if grep -q -- "--daemon" /data/adb/agh/scripts/NoAdsService.sh 2>/dev/null; then '
+        '  sh /data/adb/agh/scripts/NoAdsService.sh --once >/dev/null 2>&1; '
+        'else '
+        '  sh /data/adb/agh/scripts/NoAdsService.sh >/dev/null 2>&1 & '
+        'fi',
       );
       return result.exitCode == 0;
     } catch (_) {
@@ -771,7 +1336,7 @@ elif [ -s /data/adb/agh/bin/AdGuardHome.yaml ]; then
   awk '/^user_rules:/{f=1;next} f&&/^[a-zA-Z_]+:/{exit} f{print}' /data/adb/agh/bin/AdGuardHome.yaml | sed "s/^[[:space:]]*-[[:space:]]*//; s/^'//; s/'$//; s/^\"//; s/\"$//"
 fi
 ''';
-      final result = await Process.run('su', ['-c', cmd]);
+      final result = await _runSu(cmd);
       if (result.exitCode != 0) return [];
       final rawLines = result.stdout
           .toString()
@@ -814,9 +1379,8 @@ fi
   Future<List<String>> readAppAllowlist() async {
     if (!_isAndroid) return [];
     try {
-      final result = await Process.run(
-        'su',
-        ['-c', '[ -f /data/adb/agh/app-allow.txt ] && cat /data/adb/agh/app-allow.txt || true'],
+      final result = await _runSu(
+        '[ -f /data/adb/agh/app-allow.txt ] && cat /data/adb/agh/app-allow.txt || true',
       );
       if (result.exitCode != 0) return [];
       return result.stdout
@@ -831,24 +1395,47 @@ fi
     }
   }
 
-  Future<bool> saveAppAllowlist(List<String> packages) async {
-    if (!_isAndroid) return false;
+  Future<FirewallReloadResult> saveAppAllowlistDetailed(
+    List<String> packages,
+  ) async {
+    if (!_isAndroid) {
+      return const FirewallReloadResult(
+        succeeded: false,
+        branch: 'not_android',
+        stage: 'not_android',
+      );
+    }
     try {
-      final content = packages.map((e) => e.trim()).where((e) => e.isNotEmpty).join('\n');
+      final content = packages
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .join('\n');
       final escaped = content.replaceAll("'", "'\\''");
       final cmd = '''
 mkdir -p /data/adb/agh
-printf '%s\n' '$escaped' > /data/adb/agh/app-allow.txt
+printf '%s\\n' '$escaped' > /data/adb/agh/app-allow.txt
 chmod 644 /data/adb/agh/app-allow.txt
-/system/bin/sh /data/adb/agh/scripts/iptables.sh --apply-allowlist >/dev/null 2>&1
+/system/bin/sh /data/adb/agh/scripts/iptables.sh --apply-allowlist 2>&1
 ''';
       final result = await _runSu(cmd);
       _cachedDiag = null;
       _cachedDiagTime = null;
-      return result.exitCode == 0;
+      return FirewallReloadResult.fromScriptOutput(
+        exitCode: result.exitCode,
+        stdoutText: result.stdout.toString(),
+      );
     } catch (_) {
-      return false;
+      return const FirewallReloadResult(
+        succeeded: false,
+        branch: 'exception',
+        stage: 'exception',
+      );
     }
+  }
+
+  Future<bool> saveAppAllowlist(List<String> packages) async {
+    final res = await saveAppAllowlistDetailed(packages);
+    return res.succeeded;
   }
 
   Future<List<Map<String, dynamic>>> getInstalledApps({
@@ -906,9 +1493,8 @@ chmod 644 /data/adb/agh/app-allow.txt
     }
 
     try {
-      final result = await Process.run(
-        'su',
-        ['-c', 'pm list packages -3 2>/dev/null || pm list packages 2>/dev/null'],
+      final result = await _runSu(
+        'pm list packages -3 2>/dev/null || pm list packages 2>/dev/null',
       );
       if (result.exitCode != 0) return [];
       final lines = result.stdout.toString().split('\n');
@@ -997,7 +1583,7 @@ chmod 644 /data/adb/agh/app-allow.txt
     try {
       final cmd =
           'grep -i -H -m 25 "$safeKey" /data/adb/agh/bin/data/filters/*.txt 2>/dev/null | head -n 60 || true';
-      final result = await Process.run('su', ['-c', cmd]);
+      final result = await _runSu(cmd);
       if (result.exitCode != 0) return [];
       final lines = result.stdout.toString().split('\n');
       final List<Map<String, String>> matches = [];
@@ -1065,7 +1651,6 @@ chmod 644 /data/adb/agh/app-allow.txt
     var trimmed = rawInput.trim();
     if (trimmed.isEmpty) return [];
 
-    // 支持直接粘贴带有文字的分享口令，自动提取其中的链接
     final urlMatch = RegExp(r'https?://[^\s"<>]+').firstMatch(trimmed);
     if (urlMatch != null) {
       trimmed = urlMatch.group(0)!;
@@ -1106,10 +1691,9 @@ chmod 644 /data/adb/agh/app-allow.txt
         if (!_isAndroid) return '';
         try {
           final safeUrl = targetUrl.replaceAll("'", '');
-          final res = await Process.run('su', [
-            '-c',
-            "/system/bin/curl -sS -L -k --max-time 6 -A 'Mozilla/5.0 (Linux; Android 14) Chrome/124.0.0.0 Mobile' '$safeUrl' 2>/dev/null | head -c 262144 || true"
-          ]);
+          final res = await _runSu(
+            "/system/bin/curl -sS -L -k --max-time 6 -A 'Mozilla/5.0 (Linux; Android 14) Chrome/124.0.0.0 Mobile' '$safeUrl' 2>/dev/null | head -c 262144 || true",
+          );
           return res.stdout.toString();
         } catch (_) {
           return '';
@@ -1124,7 +1708,6 @@ chmod 644 /data/adb/agh/app-allow.txt
     }
     final StringBuffer allHtml = StringBuffer(mainHtml);
 
-    // 针对蓝奏云等使用同源 iframe 嵌套下载页的站点，自动跟进 1 层同源 iframe
     if (mainHtml.isNotEmpty) {
       final iframeRegex =
           RegExp(r'<iframe[^>]+src=["\x27](/[^"\x27>]+)["\x27]', caseSensitive: false);
@@ -1171,7 +1754,7 @@ chmod 644 /data/adb/agh/app-allow.txt
       final cmd = '''
 find /data/data/$safePkg/shared_prefs /data/data/$safePkg/files /data/data/$safePkg/databases /data/data/$safePkg/cache /data/data/$safePkg/app_webview -maxdepth 3 -type f -size -512k 2>/dev/null | head -n 60 | xargs grep -aEhro 'https?://[a-zA-Z0-9][-a-zA-Z0-9.]*\\.[a-zA-Z]{2,}' 2>/dev/null | sed -E 's#^https?://##; s#/.*##' | sort -u | head -n 80 || true
 ''';
-      final result = await Process.run('su', ['-c', cmd]);
+      final result = await _runSu(cmd);
       if (result.exitCode != 0) return [];
       final lines = result.stdout.toString().split('\n');
       final Set<String> domains = {};
@@ -1205,7 +1788,7 @@ ndc resolver flushdefaultif >/dev/null 2>&1 || true
 cmd netd resolver flushdefaultif >/dev/null 2>&1 || true
 monkey -p $safePkg -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
 ''';
-      final result = await Process.run('su', ['-c', cmd]);
+      final result = await _runSu(cmd);
       return result.exitCode == 0;
     } catch (_) {
       return false;
@@ -1234,13 +1817,11 @@ monkey -p $safePkg -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
     if (raw.length == 4) {
       final b0 = raw[0];
       final b1 = raw[1];
-      // 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16
       if (b0 == 127 || b0 == 10) return true;
       if (b0 == 172 && b1 >= 16 && b1 <= 31) return true;
       if (b0 == 192 && b1 == 168) return true;
       if (b0 == 169 && b1 == 254) return true;
     } else if (raw.length == 16) {
-      // fc00::/7 (Unique Local) or fe80::/10 (Link-Local)
       if ((raw[0] & 0xfe) == 0xfc || (raw[0] == 0xfe && (raw[1] & 0xc0) == 0x80)) {
         return true;
       }
@@ -1299,4 +1880,3 @@ monkey -p $safePkg -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
     return RegExp(r'^[a-z0-9][-a-z0-9.]*\.[a-z]{2,}$').hasMatch(host);
   }
 }
-
