@@ -21,25 +21,21 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.18
-          name: "AdGuard-Home-GoGoGo Manager v2.24.18"
+          tag_name: v2.24.19
+          name: "AdGuard-Home-GoGoGo Manager v2.24.19"
           body: |
-            ### AdGuard-Home-GoGoGo Manager `v2.24.18`
+            ### AdGuard-Home-GoGoGo Manager `v2.24.19`
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            #### 🆕 v2.24.18 升级亮点（丝滑规则更新体验、有序模式切换与后台省电优化）
-            - **大幅优化 30 万+ 大规则订阅刷新体验**：
-              - 将 `/control/filtering/refresh`、添加与编辑规则源的 HTTP 超时放宽至 **60 秒**；
-              - 将黑名单与白名单刷新由并发撞锁改为串行有序请求，消除 `filters update procedure is already running` 冲突报错；
-              - 增强规则更新结果容错判定：每次更新后强制同步刷新界面与首页规则计数，当规则库已成功拉取更新或个别源偶发网络抖动时，精准刷新规则数，彻底告别误报红条「无法更新订阅规则」。
+            #### 🆕 v2.24.19 升级亮点（有序模式切换队列、非阻塞 Root 探测与后台省电优化）
             - **目标感知有序模式切换队列与防重复重放**：
               - 相同目标模式并发请求自动合并共享结果，不同目标（如 `cn -> overseas -> cn`）严格按序排队串行执行，调用方超时不破坏底层互斥锁；
               - 拆分 Root 通道可用性探测（3 秒超时 + 失败熔断冷却）与实际业务命令执行，业务脚本返回非零时绝不跨多个 `su` 候选路径重复重放。
             - **快捷磁贴 (`AGH GoGoGo`) 防堆积与主界面自适应轮询**：
               - 状态栏磁贴引入非阻塞并发互斥与超时强制销毁子进程保护（`process.destroyForcibly()`），防止挂起耗尽协程池；
               - App 退至后台或息屏时自动暂停状态轮询，回到前台立即同步并按稳定程度自适应拉长轮询间隔（`8s -> 20s`）。
-            - **全链路兼容 `v20261113.1` 满血 DNS + SNI (443/8443) 双链核心**：
+            - **全链路兼容 `v20261116.1` 满血 DNS + SNI (443/8443) 双链核心**：
               - 同步检测 `nat` 表 `ADGUARD` 与 `mangle` 表 `AGH_SNI` 双链健康度，支持海外/国内双模无损热切换与临时 Root 软重启自愈。
           files: |
             releases/AdGuardHomeManager.apk
