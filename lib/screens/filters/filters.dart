@@ -10,6 +10,7 @@ import 'package:adguard_home_manager/screens/filters/filters_tabs_view.dart';
 import 'package:adguard_home_manager/screens/filters/details/list_details_screen.dart';
 import 'package:adguard_home_manager/screens/filters/modals/remove_custom_rule_modal.dart';
 import 'package:adguard_home_manager/screens/filters/modals/update_interval_lists_modal.dart';
+import 'package:adguard_home_manager/screens/filters/my_manual_rules_screen.dart';
 
 import 'package:adguard_home_manager/functions/snackbar.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
@@ -18,6 +19,7 @@ import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/models/filtering.dart';
 import 'package:adguard_home_manager/constants/enums.dart';
+import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
 
 class Filters extends StatefulWidget {
   const Filters({super.key});
@@ -30,6 +32,7 @@ class _FiltersState extends State<Filters> {
   @override
   void initState() {
     super.initState();
+    ManualRuleProvenanceService.instance.ensureLoaded();
     final filteringProvider =
         Provider.of<FilteringProvider>(context, listen: false);
     filteringProvider.fetchFilters(
@@ -114,27 +117,37 @@ class _FiltersState extends State<Filters> {
       ProcessModal processModal = ProcessModal();
       processModal.open(AppLocalizations.of(context)!.deletingRule);
 
-      final result = await filteringProvider.removeCustomRule(rule);
+      final result = await filteringProvider.removeCustomRuleDetailed(rule);
 
       processModal.close();
 
-      if (result == true) {
-        showSnackbar(
-            appConfigProvider: appConfigProvider,
-            label: AppLocalizations.of(context)!.ruleRemovedSuccessfully,
-            color: Colors.green);
+      if (result.ok) {
+        if (result.provenanceSaveFailed) {
+          showSnackbar(
+              appConfigProvider: appConfigProvider,
+              label: '规则已移除，但本地来源记录更新失败',
+              color: Colors.orange);
+        } else {
+          showSnackbar(
+              appConfigProvider: appConfigProvider,
+              label: AppLocalizations.of(context)!.ruleRemovedSuccessfully,
+              color: Colors.green);
+        }
       } else {
         showSnackbar(
             appConfigProvider: appConfigProvider,
-            label: AppLocalizations.of(context)!.ruleNotRemoved,
+            label: result.message ?? AppLocalizations.of(context)!.ruleNotRemoved,
             color: Colors.red);
       }
     }
 
     void openRemoveCustomRuleModal(String rule) {
+      final cls = RuleClassification.classify(rule);
       showDialog(
           context: context,
           builder: (context) => RemoveCustomRule(
+                ruleText: rule,
+                impactSummary: '${cls.scopeSummary}；移除后将交由其他或订阅规则决定解析',
                 onConfirm: () => removeCustomRule(rule),
               ));
     }
@@ -165,6 +178,18 @@ class _FiltersState extends State<Filters> {
     List<Widget> actions() {
       if (filteringProvider.loadStatus == LoadStatus.loaded) {
         return [
+          IconButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const MyManualRulesScreen(),
+                ),
+              );
+            },
+            icon: const Icon(Icons.bookmark_added_outlined),
+            tooltip: '我的手动规则',
+          ),
           if (statusProvider.loadStatus == LoadStatus.loaded)
             IconButton(
                 onPressed: enableDisableFiltering,

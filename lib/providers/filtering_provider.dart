@@ -4,15 +4,46 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import 'package:adguard_home_manager/constants/enums.dart';
-import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/models/filtering.dart';
+import 'package:adguard_home_manager/models/server.dart';
+import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
 import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
+import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
 
 enum FilteringListActions { edit, enable, disable }
 
+class RuleMutationResult {
+  final bool ok;
+  final bool conflictDetected;
+  final bool provenanceSaveFailed;
+  final bool duplicateAmbiguous;
+  final bool readbackFailed;
+  final int addedCount;
+  final int removedCount;
+  final String? message;
+
+  const RuleMutationResult({
+    required this.ok,
+    this.conflictDetected = false,
+    this.provenanceSaveFailed = false,
+    this.duplicateAmbiguous = false,
+    this.readbackFailed = false,
+    this.addedCount = 0,
+    this.removedCount = 0,
+    this.message,
+  });
+}
+
 class FilteringProvider with ChangeNotifier {
+  final ManualRuleProvenanceService _provenanceService;
+
+  FilteringProvider({
+    ManualRuleProvenanceService? provenanceService,
+  }) : _provenanceService =
+            provenanceService ?? ManualRuleProvenanceService.instance;
+
   StatusProvider? _statusProvider;
   ServersProvider? _serversProvider;
 
@@ -63,18 +94,27 @@ class FilteringProvider with ChangeNotifier {
     }
   }
 
+  Future<void> _syncProvenanceWith(Server server, List<String> coreRules) async {
+    await _provenanceService.syncWithCoreRules(
+      serverKey: ServerRuleWriteQueue.serverKeyFor(server),
+      coreRules: coreRules,
+    );
+  }
+
   Future<bool> _doFetchFilters() async {
-    if (_serversProvider?.apiClient2 == null) {
+    final api = _serversProvider?.apiClient2;
+    if (api == null) {
       if (_filtering == null) {
         _loadStatus = LoadStatus.error;
         notifyListeners();
       }
       return false;
     }
-    final result = await _serversProvider!.apiClient2!.getFiltering();
+    final result = await api.getFiltering();
     if (result.successful == true) {
       _filtering = result.content as Filtering;
       _loadStatus = LoadStatus.loaded;
+      await _syncProvenanceWith(api.server, _filtering!.userRules);
       notifyListeners();
       return true;
     } else {
@@ -187,24 +227,58 @@ class FilteringProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> _mutateCustomRulesOnServer(
+  Future<RuleMutationResult> _mutateCustomRulesOnServer(
     List<String> Function(List<String> currentRules) transform, {
     String? explicitExpectedRevision,
+    required String entryPoint,
+    String? refuseDuplicateRemoveRule,
   }) async {
     final api = _serversProvider?.apiClient2;
-    if (api == null) return false;
+    if (api == null) {
+      return const RuleMutationResult(ok: false, message: '未连接服务器');
+    }
 
     return ServerRuleWriteQueue.run(api.server, (session) async {
       // 轮到本服务器写队列时重新拉取最新规则与 revision，避免基于排队前快照盲写覆盖
       final beforeRes = await api.getFiltering();
       if (beforeRes.successful != true || beforeRes.content is! Filtering) {
         notifyListeners();
-        return false;
+        return const RuleMutationResult(
+          ok: false,
+          message: '读取当前自定义规则失败，未修改任何规则',
+        );
       }
       final latestFiltering = beforeRes.content as Filtering;
+      final beforeRules = List<String>.from(latestFiltering.userRules);
+
+      if (refuseDuplicateRemoveRule != null) {
+        final target = refuseDuplicateRemoveRule.trim();
+        final count = beforeRules.where((r) => r.trim() == target).length;
+        if (count == 0) {
+          await _syncProvenanceWith(api.server, beforeRules);
+          _filtering = latestFiltering;
+          notifyListeners();
+          return const RuleMutationResult(
+            ok: false,
+            message: '该规则已不在 Core 自定义规则列表中，已同步本地状态',
+          );
+        }
+        if (count > 1) {
+          await _syncProvenanceWith(api.server, beforeRules);
+          _filtering = latestFiltering;
+          notifyListeners();
+          return RuleMutationResult(
+            ok: false,
+            duplicateAmbiguous: true,
+            message:
+                '存在重复规则（Core 中共 $count 条相同文本），归属未确认，已拒绝按索引猜测删除；请前往批量规则编辑器确认具体行后再处理',
+          );
+        }
+      }
+
       final expectedRev =
           explicitExpectedRevision ?? latestFiltering.userRulesRevision;
-      final newRules = transform(List<String>.from(latestFiltering.userRules));
+      final newRules = transform(List<String>.from(beforeRules));
 
       final result = await api.setCustomRules(
         rules: newRules,
@@ -213,35 +287,85 @@ class FilteringProvider with ChangeNotifier {
 
       if (result.successful == true) {
         session.bumpLocalEpoch();
-        // 优先回读最新状态与更新后的 revision，确保本地视图与服务端一致
+        // 优先回读最新状态与更新后的 revision，确保本地视图与服务端一致；
+        // 只有回读成功确认内容，才把变更记入本地手动来源库。
         final afterRes = await api.getFiltering();
         if (afterRes.successful == true && afterRes.content is Filtering) {
-          _filtering = afterRes.content as Filtering;
+          final confirmedFiltering = afterRes.content as Filtering;
+          _filtering = confirmedFiltering;
+          final afterRules = List<String>.from(confirmedFiltering.userRules);
+          final diff = RuleListDiffResult.diff(beforeRules, afterRules);
+
+          final saved = await _provenanceService.applyRuleListMutationDiff(
+            serverKey: session.serverKey,
+            rulesBefore: beforeRules,
+            rulesAfter: afterRules,
+            entryPoint: entryPoint,
+            confirmedRevision: result.userRulesRevisionHeader ??
+                confirmedFiltering.userRulesRevision,
+          );
+          _flushDnsCaches();
+          notifyListeners();
+          final addedTotal = diff.addedCounts.values.fold(0, (a, b) => a + b);
+          final removedTotal =
+              diff.removedCounts.values.fold(0, (a, b) => a + b);
+          return RuleMutationResult(
+            ok: true,
+            provenanceSaveFailed: !saved,
+            addedCount: addedTotal,
+            removedCount: removedTotal,
+            message: saved ? null : '规则已添加，但来源记录保存失败。',
+          );
         } else {
           final filteringData = _filtering ?? latestFiltering;
           filteringData.userRules = newRules;
           _filtering = filteringData;
+          _flushDnsCaches();
+          notifyListeners();
+          return const RuleMutationResult(
+            ok: true,
+            readbackFailed: true,
+            message: '规则已提交，但回读确认 Core 状态失败，暂未写入已确认来源记录',
+          );
         }
-        _flushDnsCaches();
-        notifyListeners();
-        return true;
       } else {
         if (result.statusCode == 409) {
           final refreshed = await api.getFiltering();
           if (refreshed.successful == true && refreshed.content is Filtering) {
             _filtering = refreshed.content as Filtering;
+            await _syncProvenanceWith(api.server, _filtering!.userRules);
           }
+          notifyListeners();
+          return const RuleMutationResult(
+            ok: false,
+            conflictDetected: true,
+            message: '检测到其他客户端同时修改了自定义规则（版本冲突），已重新读取最新列表，请确认后重试',
+          );
         }
         notifyListeners();
-        return false;
+        return const RuleMutationResult(
+          ok: false,
+          message: '提交自定义规则失败，请重试',
+        );
       }
     });
   }
 
-  Future<bool> removeCustomRule(String rule) {
+  Future<RuleMutationResult> removeCustomRuleDetailed(
+    String rule, {
+    bool refuseDuplicateRemoval = true,
+  }) {
+    final target = rule.trim();
     return _mutateCustomRulesOnServer(
-      (current) => current.where((r) => r != rule).toList(),
+      (current) => current.where((r) => r.trim() != target).toList(),
+      entryPoint: '手动移除规则',
+      refuseDuplicateRemoveRule: refuseDuplicateRemoval ? target : null,
     );
+  }
+
+  Future<bool> removeCustomRule(String rule) async {
+    final res = await removeCustomRuleDetailed(rule);
+    return res.ok;
   }
 
   Future<bool> deleteList(
@@ -302,43 +426,98 @@ class FilteringProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> addCustomRule(String rule) {
+  Future<RuleMutationResult> addCustomRuleDetailed(
+    String rule, {
+    String entryPoint = '自定义规则-单条添加',
+  }) {
     final String trimmed = rule.trim();
+    if (trimmed.isEmpty) {
+      return Future.value(
+        const RuleMutationResult(ok: false, message: '规则内容为空'),
+      );
+    }
     final Set<String> toRemove = {trimmed};
-    if (trimmed.startsWith('@@||')) {
-      final base = trimmed.substring(2).replaceAll('\$important', '');
+    final cls = RuleClassification.classify(trimmed);
+    if (cls.action == ManualRuleAction.allow && cls.extractableHost != null) {
+      final host = cls.extractableHost!;
       toRemove.addAll({
-        base,
-        '$base\$important',
-        '@@$base',
-        '@@$base\$important',
+        '||$host^',
+        '||$host^\$important',
+        '@@||$host^',
+        '@@||$host^\$important',
       });
-    } else if (trimmed.startsWith('||')) {
-      final base = trimmed.replaceAll('\$important', '');
+    } else if (cls.action == ManualRuleAction.block &&
+        cls.extractableHost != null) {
+      final host = cls.extractableHost!;
       toRemove.addAll({
-        base,
-        '$base\$important',
-        '@@$base',
-        '@@$base\$important',
+        '||$host^',
+        '||$host^\$important',
+        '@@||$host^',
+        '@@||$host^\$important',
       });
     }
-    return _mutateCustomRulesOnServer((current) {
-      final newRules =
-          current.where((r) => !toRemove.contains(r.trim())).toList();
-      newRules.add(trimmed);
-      return newRules;
-    });
+    return _mutateCustomRulesOnServer(
+      (current) {
+        final newRules =
+            current.where((r) => !toRemove.contains(r.trim())).toList();
+        newRules.add(trimmed);
+        return newRules;
+      },
+      entryPoint: entryPoint,
+    );
+  }
+
+  Future<bool> addCustomRule(String rule) async {
+    final res = await addCustomRuleDetailed(rule);
+    return res.ok;
+  }
+
+  Future<RuleMutationResult> setCustomRulesDetailed(
+    List<String> rules, {
+    String? expectedRevision,
+    String entryPoint = '自定义规则-批量编辑',
+  }) {
+    final newRules = rules
+        .map((r) => r.trim())
+        .where((r) => r.isNotEmpty)
+        .toList();
+    return _mutateCustomRulesOnServer(
+      (_) => newRules,
+      explicitExpectedRevision: expectedRevision,
+      entryPoint: entryPoint,
+    );
   }
 
   Future<bool> setCustomRules(
     List<String> rules, {
     String? expectedRevision,
-  }) {
-    final newRules = rules.where((r) => r != " " && r != "").toList();
-    return _mutateCustomRulesOnServer(
-      (_) => newRules,
-      explicitExpectedRevision: expectedRevision,
+  }) async {
+    final res = await setCustomRulesDetailed(
+      rules,
+      expectedRevision: expectedRevision,
     );
+    return res.ok;
+  }
+
+  /// 主动认领当前 Core 中已存在但“来源未记录/来源未确认”的自定义规则（写入 source=claimed，createdAt=null）。
+  Future<bool> claimExistingCustomRule(
+    String rule, {
+    String entryPoint = '自定义规则-主动认领',
+    String? note,
+  }) async {
+    final api = _serversProvider?.apiClient2;
+    final latest = _filtering;
+    if (api == null || latest == null) return false;
+    final ok = await _provenanceService.claimExistingRule(
+      serverKey: ServerRuleWriteQueue.serverKeyFor(api.server),
+      ruleText: rule,
+      latestCoreRules: latest.userRules,
+      entryPoint: entryPoint,
+      confirmedRevision: latest.userRulesRevision,
+      note: note,
+    );
+    if (ok) notifyListeners();
+    return ok;
   }
 
   Future<Map<String, dynamic>> addList(

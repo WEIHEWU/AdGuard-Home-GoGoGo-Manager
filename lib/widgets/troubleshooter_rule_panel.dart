@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import 'package:adguard_home_manager/functions/format_time.dart';
 import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
+import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
+import 'package:adguard_home_manager/widgets/rule_provenance_badge.dart';
 
 /// 置顶实时规则检测卡片（与历史事件严格分离，不受日志刷屏挤出视野）。
 class LiveRuleDiagnosticCard extends StatelessWidget {
@@ -13,6 +15,9 @@ class LiveRuleDiagnosticCard extends StatelessWidget {
   final bool writeBusy;
   final Future<void> Function(String rule, {required bool confirmBroad}) onApplyException;
   final Future<void> Function(String addedRule) onUndoException;
+  final String? serverKey;
+  final ManualRuleProvenanceService? provenanceService;
+  final VoidCallback? onOpenMyManualRules;
 
   const LiveRuleDiagnosticCard({
     super.key,
@@ -24,6 +29,9 @@ class LiveRuleDiagnosticCard extends StatelessWidget {
     required this.writeBusy,
     required this.onApplyException,
     required this.onUndoException,
+    this.serverKey,
+    this.provenanceService,
+    this.onOpenMyManualRules,
   });
 
   static Color statusColor(RuleCheckStatus status) {
@@ -184,17 +192,55 @@ class LiveRuleDiagnosticCard extends StatelessWidget {
             ),
             if (orig.rules.isNotEmpty) ...[
               const SizedBox(height: 8),
-              for (final r in orig.rules)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 3),
-                  child: Text(
-                    '· [${r.sourceName}] ${r.text}',
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 11.5,
-                    ),
+              for (final r in orig.rules) ...[
+                Builder(
+                  builder: (context) {
+                    final prov = provenanceService ??
+                        ManualRuleProvenanceService.instance;
+                    final disp = prov.resolveMatchedRuleDisplay(
+                      serverKey: serverKey,
+                      ruleText: r.text,
+                      filterListId: r.filterListId,
+                      subscriptionDisplayName: r.sourceName,
+                    );
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          RuleProvenanceBadge(display: disp, compact: true),
+                          Text(
+                            r.text,
+                            style: const TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ],
+            if (onOpenMyManualRules != null) ...[
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  onPressed: onOpenMyManualRules,
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  icon: const Icon(Icons.bookmark_added_outlined, size: 15),
+                  label: const Text(
+                    '管理我的手动规则',
+                    style: TextStyle(fontSize: 12),
                   ),
                 ),
+              ),
             ],
             if (suggestion != null) ...[
               const Divider(height: 14),

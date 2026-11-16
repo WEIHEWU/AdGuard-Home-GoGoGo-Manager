@@ -41,50 +41,87 @@ class AddFiltersButton extends StatelessWidget {
       ProcessModal processModal = ProcessModal();
       processModal.open(AppLocalizations.of(context)!.addingRule);
 
-      final result = await filteringProvider.addCustomRule(rule);
+      final result = await filteringProvider.addCustomRuleDetailed(
+        rule,
+        entryPoint: '自定义规则-单条添加',
+      );
 
       processModal.close();
 
       if (!context.mounted) return;
-      if (result == true) {
+      if (result.ok) {
+        if (result.provenanceSaveFailed) {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: result.message ?? '规则已添加，但来源记录保存失败。',
+            color: Colors.orange,
+          );
+        } else if (result.readbackFailed) {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: result.message ?? '规则已提交，但回读确认 Core 状态失败',
+            color: Colors.orange,
+          );
+        } else {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: AppLocalizations.of(context)!.ruleAddedSuccessfully,
+            color: Colors.green,
+          );
+        }
+      } else {
         showSnackbar(
           appConfigProvider: appConfigProvider,
-          label: AppLocalizations.of(context)!.ruleAddedSuccessfully, 
-          color: Colors.green
-        );
-      }
-      else {
-        showSnackbar(
-          appConfigProvider: appConfigProvider,
-          label: AppLocalizations.of(context)!.ruleNotAdded, 
-          color: Colors.red
+          label: result.message ?? AppLocalizations.of(context)!.ruleNotAdded,
+          color: Colors.red,
         );
       }
     }
 
-    void confirmEditCustomRules(List<String> rules) async {
+    void confirmEditCustomRules(
+      List<String> rules, {
+      String? expectedRevision,
+    }) async {
       if (!context.mounted) return;
 
       ProcessModal processModal = ProcessModal();
       processModal.open(AppLocalizations.of(context)!.savingCustomRules);
 
-      final result = await filteringProvider.setCustomRules(rules);
+      final result = await filteringProvider.setCustomRulesDetailed(
+        rules,
+        expectedRevision: expectedRevision,
+        entryPoint: '自定义规则-批量编辑',
+      );
 
       processModal.close();
 
       if (!context.mounted) return;
-      if (result == true) {
+      if (result.ok) {
+        if (result.provenanceSaveFailed) {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: result.message ?? '规则已添加，但来源记录保存失败。',
+            color: Colors.orange,
+          );
+        } else if (result.readbackFailed) {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: result.message ?? '规则已提交，但回读确认 Core 状态失败',
+            color: Colors.orange,
+          );
+        } else {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: AppLocalizations.of(context)!.customRulesUpdatedSuccessfully,
+            color: Colors.green,
+          );
+        }
+      } else {
         showSnackbar(
           appConfigProvider: appConfigProvider,
-          label: AppLocalizations.of(context)!.customRulesUpdatedSuccessfully, 
-          color: Colors.green
-        );
-      }
-      else {
-        showSnackbar(
-          appConfigProvider: appConfigProvider,
-          label: AppLocalizations.of(context)!.customRulesNotUpdated, 
-          color: Colors.red
+          label: result.message ??
+              AppLocalizations.of(context)!.customRulesNotUpdated,
+          color: Colors.red,
         );
       }
     }
@@ -117,6 +154,7 @@ class AddFiltersButton extends StatelessWidget {
     }
 
     void openEditCustomRule() {
+      final openedRevision = filteringProvider.filtering?.userRulesRevision;
       showGeneralDialog(
         context: context, 
         barrierColor: !(width > 700 || !(Platform.isAndroid || Platform.isIOS))
@@ -138,7 +176,10 @@ class AddFiltersButton extends StatelessWidget {
         },
         pageBuilder: (context, animation, secondaryAnimation) => EditCustomRules(
           fullScreen: !(width > 700 || !(Platform.isAndroid || Platform.isIOS)),
-          onConfirm: confirmEditCustomRules,
+          onConfirm: (rules) => confirmEditCustomRules(
+            rules,
+            expectedRevision: openedRevision,
+          ),
         ),
       );
     }

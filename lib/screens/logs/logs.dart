@@ -6,6 +6,7 @@ import 'package:adguard_home_manager/l10n/app_localizations.dart';
 
 import 'package:adguard_home_manager/screens/logs/log_tile.dart';
 import 'package:adguard_home_manager/widgets/floating_search_bar.dart';
+import 'package:adguard_home_manager/widgets/rule_provenance_badge.dart';
 import 'package:adguard_home_manager/constants/enums.dart';
 import 'package:adguard_home_manager/functions/copy_clipboard.dart';
 import 'package:adguard_home_manager/functions/format_time.dart';
@@ -14,7 +15,9 @@ import 'package:adguard_home_manager/models/applied_filters.dart';
 import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/logs_provider.dart';
+import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
+import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
 
 class Logs extends StatefulWidget {
   const Logs({super.key});
@@ -31,6 +34,7 @@ class _LogsState extends State<Logs> {
   @override
   void initState() {
     super.initState();
+    ManualRuleProvenanceService.instance.ensureLoaded();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       Provider.of<LogsProvider>(context, listen: false).fetchLogs();
@@ -340,12 +344,47 @@ class _AggregatedLogsPageTile extends StatelessWidget {
                       const SizedBox(height: 8),
                       const Text('命中规则:', style: TextStyle(fontWeight: FontWeight.w600)),
                       for (final r in group.matchedRules)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 3),
-                          child: Text(
-                            '[${r.sourceName}] ${r.text}',
-                            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                          ),
+                        Builder(
+                          builder: (builderCtx) {
+                            String? srvKey;
+                            try {
+                              srvKey = ManualRuleProvenanceService
+                                  .serverKeyForNullable(
+                                Provider.of<ServersProvider>(builderCtx,
+                                        listen: false)
+                                    .selectedServer,
+                              );
+                            } catch (_) {
+                              srvKey = null;
+                            }
+                            final disp = ManualRuleProvenanceService.instance
+                                .resolveMatchedRuleDisplay(
+                              serverKey: srvKey,
+                              ruleText: r.text,
+                              filterListId: r.filterListId,
+                              subscriptionDisplayName: r.sourceName,
+                            );
+                            return Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  RuleProvenanceBadge(
+                                    compact: true,
+                                    display: disp,
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    r.text,
+                                    style: const TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
                         ),
                     ],
                     const SizedBox(height: 10),

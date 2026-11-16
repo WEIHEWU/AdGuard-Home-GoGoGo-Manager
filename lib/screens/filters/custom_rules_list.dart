@@ -9,6 +9,8 @@ import 'package:adguard_home_manager/l10n/app_localizations.dart';
 
 import 'package:adguard_home_manager/screens/filters/add_button.dart';
 import 'package:adguard_home_manager/screens/filters/modals/custom_rules/sort_rules.dart';
+import 'package:adguard_home_manager/screens/filters/my_manual_rules_screen.dart';
+import 'package:adguard_home_manager/widgets/rule_provenance_badge.dart';
 import 'package:adguard_home_manager/widgets/tab_content_list.dart';
 
 import 'package:adguard_home_manager/functions/snackbar.dart';
@@ -16,6 +18,9 @@ import 'package:adguard_home_manager/models/filtering.dart';
 import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/constants/enums.dart';
 import 'package:adguard_home_manager/providers/filtering_provider.dart';
+import 'package:adguard_home_manager/providers/servers_provider.dart';
+import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
+import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
 
 class CustomRulesList extends StatefulWidget {
   final LoadStatus loadStatus;
@@ -41,7 +46,6 @@ class _CustomRulesListState extends State<CustomRulesList>
     with AutomaticKeepAliveClientMixin {
   static const int _initialPageSize = 150;
   static const int _pageIncrement = 200;
-  static const double _ruleItemExtent = 60.0;
 
   late final ScrollController _internalScrollController;
   final ValueNotifier<bool> _fabVisible = ValueNotifier<bool>(true);
@@ -98,21 +102,143 @@ class _CustomRulesListState extends State<CustomRulesList>
     }
   }
 
+  final ManualRuleProvenanceService _provenanceService =
+      ManualRuleProvenanceService.instance;
+
+  void _onProvenanceChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
     _internalScrollController = ScrollController();
     _effectiveScrollController.addListener(_onScroll);
+    _provenanceService.addListener(_onProvenanceChanged);
+    _provenanceService.ensureLoaded();
   }
 
   @override
   void dispose() {
+    _provenanceService.removeListener(_onProvenanceChanged);
     _effectiveScrollController.removeListener(_onScroll);
     if (widget.scrollController == null) {
       _internalScrollController.dispose();
     }
     _fabVisible.dispose();
     super.dispose();
+  }
+
+  Future<void> _showRuleProvenanceDialog({
+    required BuildContext context,
+    required String rule,
+    required RuleSourceDisplay display,
+    required FilteringProvider filteringProvider,
+    required AppConfigProvider appConfigProvider,
+    required String? serverKey,
+  }) async {
+    final cls = RuleClassification.classify(rule);
+    final rec = display.record;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('自定义规则详情与来源'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              RuleProvenanceBadge(display: display),
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: SelectableText(
+                  rule,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text('作用范围：${cls.scopeSummary}'),
+              if (rec != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  rec.source == ManualRuleSource.claimed
+                      ? '入口：${rec.entryPoint} · 原添加时间未知（认领于 ${formatManualRuleTimestamp(rec.claimedAt)}）'
+                      : '入口：${rec.entryPoint} · 添加时间：${formatManualRuleTimestamp(rec.createdAt)}',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                if (rec.note != null && rec.note!.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text('备注：${rec.note!}'),
+                ],
+              ] else ...[
+                const SizedBox(height: 6),
+                Text(
+                  display.isUnconfirmedOrAmbiguous
+                      ? (display.secondaryHint ?? '来源记录当前无法确认，请检查本地备份或批量规则')
+                      : '暂未记录操作来源（可能由升级前添加、外部 Web 控制台或配置同步引入）。你可以主动将其认领为我的手动规则，系统仅记录认领时间而不伪造历史添加时间。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          if (display.isUnrecordedCustom && serverKey != null)
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                final noteResult = await showDialog<String?>(
+                  context: context,
+                  builder: (_) => const _ClaimExistingRuleDialog(),
+                );
+                if (noteResult == null || !context.mounted) return;
+                final ok = await filteringProvider.claimExistingCustomRule(
+                  rule,
+                  note: noteResult,
+                );
+                if (!context.mounted) return;
+                showSnackbar(
+                  appConfigProvider: appConfigProvider,
+                  label: ok ? '已标记为“用户认领”' : '认领失败，请刷新后重试',
+                  color: ok ? Colors.green : Colors.red,
+                );
+              },
+              child: const Text('标记为我的手动管理规则'),
+            ),
+          if (rec != null && rec.syncStatus != ManualRuleSyncStatus.missing)
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const MyManualRulesScreen()),
+                );
+              },
+              child: const Text('在“我的手动规则”管理'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -122,6 +248,12 @@ class _CustomRulesListState extends State<CustomRulesList>
         Provider.of<FilteringProvider>(context, listen: false);
     final appConfigProvider =
         Provider.of<AppConfigProvider>(context, listen: false);
+    final serversProvider =
+        Provider.of<ServersProvider>(context, listen: false);
+    final server = serversProvider.selectedServer;
+    final serverKey =
+        server == null ? null : ServerRuleWriteQueue.serverKeyFor(server);
+    final coreRuleCounts = RuleListDiffResult.countExactRules(widget.data);
     final l10n = AppLocalizations.of(context)!;
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
@@ -232,9 +364,7 @@ class _CustomRulesListState extends State<CustomRulesList>
     return CustomTabContentList(
       scrollController: _effectiveScrollController,
       headerWidget: hasAnyRules ? buildFilterBar() : null,
-      itemExtent: (hasAnyRules && renderEntries.isNotEmpty)
-          ? _ruleItemExtent
-          : null,
+      itemExtent: null,
       loadingGenerator: () => SizedBox(
         width: double.maxFinite,
         height: MediaQuery.of(context).size.height - 171,
@@ -271,28 +401,80 @@ class _CustomRulesListState extends State<CustomRulesList>
           );
         }
         final entry = renderEntries[index];
-        final Widget subtitle;
+        final Widget typeLabel;
         switch (entry.type) {
           case CustomRuleType.allow:
-            subtitle = allowedSubtitle;
+            typeLabel = allowedSubtitle;
             break;
           case CustomRuleType.comment:
-            subtitle = commentSubtitle;
+            typeLabel = commentSubtitle;
             break;
           case CustomRuleType.block:
-            subtitle = blockedSubtitle;
+            typeLabel = blockedSubtitle;
             break;
         }
+        final cleanRule = entry.raw.trim();
+        final dupCount = coreRuleCounts[cleanRule] ?? 1;
+        final display = entry.isComment
+            ? null
+            : _provenanceService.resolveCustomListRowDisplay(
+                serverKey: serverKey,
+                rawRule: cleanRule,
+                duplicateCountInCore: dupCount,
+              );
+        final noteSnippet = display?.record?.note;
+
         return ListTile(
           key: ValueKey<String>('${index}_${entry.raw}'),
           dense: true,
+          onTap: entry.isComment || display == null
+              ? null
+              : () => _showRuleProvenanceDialog(
+                    context: context,
+                    rule: entry.raw,
+                    display: display,
+                    filteringProvider: filteringProvider,
+                    appConfigProvider: appConfigProvider,
+                    serverKey: serverKey,
+                  ),
           title: Text(
             entry.raw,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: entry.isComment ? commentTitleStyle : activeTitleStyle,
           ),
-          subtitle: subtitle,
+          subtitle: entry.isComment || display == null
+              ? typeLabel
+              : Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          typeLabel,
+                          RuleProvenanceBadge(display: display, compact: true),
+                        ],
+                      ),
+                      if (noteSnippet != null && noteSnippet.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            '备注：$noteSnippet',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
           trailing: IconButton(
             onPressed: () => widget.onRemoveCustomRule(entry.raw),
             icon: const Icon(Icons.delete_outline_rounded, size: 20),
@@ -397,6 +579,67 @@ class _CustomRulesListState extends State<CustomRulesList>
       ),
       heightFabHidden: -180,
       fabVisibleListenable: _fabVisible,
+    );
+  }
+}
+
+class _ClaimExistingRuleDialog extends StatefulWidget {
+  const _ClaimExistingRuleDialog();
+
+  @override
+  State<_ClaimExistingRuleDialog> createState() =>
+      _ClaimExistingRuleDialogState();
+}
+
+class _ClaimExistingRuleDialogState extends State<_ClaimExistingRuleDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('标记为我的手动管理规则'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '这是主动认领，无法追溯原始添加者及添加时间；确认后将标为“用户认领”并记录当前认领时间，不会修改 Core 规则本身。',
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _controller,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: '可选备注（如：用于放行某服务）',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _controller.text),
+          child: const Text('确认认领'),
+        ),
+      ],
     );
   }
 }

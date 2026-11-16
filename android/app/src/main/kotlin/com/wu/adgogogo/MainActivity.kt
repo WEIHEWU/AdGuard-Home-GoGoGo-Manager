@@ -118,12 +118,60 @@ class MainActivity: FlutterActivity() {
             diagnosticsChannelName
         ).setMethodCallHandler { call, result ->
             when (call.method) {
+                "getAppFilesDir" -> {
+                    if (!filesDir.exists()) {
+                        filesDir.mkdirs()
+                    }
+                    result.success(filesDir.absolutePath)
+                }
                 "getCacheDiagDir" -> {
                     val dir = File(cacheDir, "diag_bundles")
                     if (!dir.exists()) {
                         dir.mkdirs()
                     }
                     result.success(dir.absolutePath)
+                }
+                "getCacheBackupDir" -> {
+                    val dir = File(cacheDir, "manual_backups")
+                    if (!dir.exists()) {
+                        dir.mkdirs()
+                    }
+                    result.success(dir.absolutePath)
+                }
+                "shareBackupFile" -> {
+                    val filePath = call.argument<String>("filePath")
+                    val title = call.argument<String>("title") ?: "Share Manual Rule Provenance Backup"
+                    if (filePath.isNullOrBlank()) {
+                        result.error("INVALID_ARG", "Missing filePath", null)
+                        return@setMethodCallHandler
+                    }
+                    val backupDir = File(cacheDir, "manual_backups").canonicalFile
+                    val targetFile = File(filePath).canonicalFile
+                    if (!targetFile.exists() || !targetFile.isFile ||
+                        !targetFile.path.startsWith(backupDir.path + File.separator)
+                    ) {
+                        result.error("INVALID_PATH", "Backup file not found in cache backup dir", null)
+                        return@setMethodCallHandler
+                    }
+                    try {
+                        val authority = "${applicationContext.packageName}.fileprovider"
+                        val contentUri = FileProvider.getUriForFile(this, authority, targetFile)
+                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "application/json"
+                            putExtra(Intent.EXTRA_STREAM, contentUri)
+                            clipData = ClipData.newRawUri("manual_rule_backup", contentUri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        val chooser = Intent.createChooser(sendIntent, title).apply {
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(chooser)
+                        result.success(true)
+                    } catch (_: ActivityNotFoundException) {
+                        result.success(false)
+                    } catch (t: Throwable) {
+                        result.error("SHARE_FAILED", t.message, null)
+                    }
                 }
                 "shareDiagBundle" -> {
                     val filePath = call.argument<String>("filePath")

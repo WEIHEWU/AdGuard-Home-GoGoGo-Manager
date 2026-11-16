@@ -21,20 +21,23 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.24-rc.1
-          name: "AdGuard-Home-GoGoGo Manager v2.24.24-rc.1 (Pre-release)"
+          tag_name: v2.24.25-rc.1
+          name: "AdGuard-Home-GoGoGo Manager v2.24.25-rc.1 (Pre-release)"
           prerelease: true
           make_latest: false
           body: |
-            ### AdGuard-Home-GoGoGo Manager `v2.24.24-rc.1` (Candidate / Pre-release)
+            ### AdGuard-Home-GoGoGo Manager `v2.24.25-rc.1` (Candidate / Pre-release)
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests, Manager static analysis & 35 unit/widget/HTTP mock tests, and APK signature/ABI verification passed; on-device Android verification (SendGrid check -> confirmed narrow allowlist -> A/AAAA verify -> retry -> undo) is pending.
+            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests unchanged at `v2026-11-16-rc.3`, Manager static analysis & all 43 unit/widget/HTTP mock tests, and APK signature/ABI verification passed; on-device Android verification is pending.
 
-            #### 🆕 v2.24.24-rc.1 收尾补修亮点
-            - **基于提交 `X-User-Rules-Revision` 与核心实例 ID 的可核验撤销归属**：
-              - 写入自定义规则时读取 POST 返回头 `X-User-Rules-Revision`，回读 `/filtering/status` 时必须同时满足版本号等于本次提交版本号、完整规则逐项一致与新增槽位匹配才签发撤销凭证；
-              - 配套 `Core v2026-11-16-rc.3` 每次启动生成唯一核心实例 ID，核心重启或配置被其他客户端更新后旧撤销凭证一律保守拒绝并保留既有规则；不支持提交版本的旧核心保守禁用自动撤销。
+            #### 🆕 v2.24.25-rc.1 新增通用手动规则来源标记与“我的手动规则”管理
+            - **通用手动规则来源记录（`ManualRuleProvenanceService`）**：
+              - 覆盖误杀排错、日志详情拦截/放行、自定义规则单条添加、批量编辑器（多重集合精确行差异）与明确移除全入口，均通过服务器共享写队列、`expected_revision` 与写后回读确认后才保存来源记录；
+              - 严格区分`手动放行` / `手动拦截` / `手动规则` / `用户认领` / 订阅名称 / `来源未记录` / `来源未确认` / `归属未确认`，绝不靠规则前缀（`@@`）或列表 ID 猜来源，不修改既有订阅、默认规则与过滤策略；
+              - 采用应用私有目录 `filesDir` 原子临时文件写入并按服务器 key 隔离，支持纯来源与备注 JSON 备份导出分享与 Schema 校验导入（绝不含服务器密码或 Token，且不进入一键诊断包）；
+            - **全新“我的手动规则”集中管理页（`MyManualRulesScreen`）**：
+              - 支持分类筛选、搜索、时间排序、备注纯本地编辑、“移除管理记录，保留规则”、主动认领“来源未记录”规则、明确展示原文与影响范围的二次确认移除，以及“检查是否生效”（对可探测简单规则实时发起 `A` / `AAAA` `/control/filtering/check_host`，将来源归属与实际是否命中清晰分离）。
           files: |
             releases/AdGuardHomeManager.apk

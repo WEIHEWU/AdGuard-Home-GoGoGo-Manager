@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 import 'package:adguard_home_manager/l10n/app_localizations.dart';
 
 import 'package:adguard_home_manager/widgets/options_menu.dart';
+import 'package:adguard_home_manager/widgets/rule_provenance_badge.dart';
+import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
 import 'package:adguard_home_manager/classes/process_modal.dart';
 import 'package:adguard_home_manager/functions/snackbar.dart';
@@ -15,6 +17,7 @@ import 'package:adguard_home_manager/functions/get_filtered_status.dart';
 import 'package:adguard_home_manager/models/logs.dart';
 import 'package:adguard_home_manager/functions/format_time.dart';
 import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
+import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
 
 class LogTile extends StatelessWidget {
   final Log log;
@@ -61,6 +64,15 @@ class LogTile extends StatelessWidget {
       }
     }
 
+    String? serverKey;
+    try {
+      serverKey = ManualRuleProvenanceService.serverKeyForNullable(
+        Provider.of<ServersProvider>(context, listen: false).selectedServer,
+      );
+    } catch (_) {
+      serverKey = null;
+    }
+
     Future<void> blockUnblock({
       required String domain,
       required String newStatus,
@@ -69,20 +81,35 @@ class LogTile extends StatelessWidget {
       final processModal = ProcessModal();
       processModal.open(l10n.savingUserFilters);
 
-      final ok = await statusProvider.blockUnblockDomain(
+      final outcome = await statusProvider.blockUnblockDomainDetailed(
         domain: domain,
         newStatus: newStatus,
+        entryPoint: '日志详情',
       );
 
       processModal.close();
       if (!context.mounted) return;
-      showSnackbar(
-        appConfigProvider: appConfigProvider,
-        label: ok
-            ? l10n.userFilteringRulesUpdated
-            : l10n.userFilteringRulesNotUpdated,
-        color: ok ? Colors.green : Colors.red,
-      );
+      if (outcome.ok) {
+        if (outcome.provenanceSaveFailed || outcome.readbackFailed) {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: outcome.message ?? l10n.userFilteringRulesUpdated,
+            color: Colors.orange,
+          );
+        } else {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: l10n.userFilteringRulesUpdated,
+            color: Colors.green,
+          );
+        }
+      } else {
+        showSnackbar(
+          appConfigProvider: appConfigProvider,
+          label: outcome.message ?? l10n.userFilteringRulesNotUpdated,
+          color: Colors.red,
+        );
+      }
     }
 
     final domain = log.question.name;
@@ -133,18 +160,35 @@ class LogTile extends StatelessWidget {
                     ),
                   ],
                   if (matchedRules.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    for (final mr in matchedRules)
+                    const SizedBox(height: 8),
+                    for (final mr in matchedRules) ...[
                       Padding(
-                        padding: const EdgeInsets.only(top: 2),
-                        child: Text(
-                          '[${mr.sourceName}] ${mr.text}',
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 12.5,
-                          ),
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            RuleProvenanceBadge(
+                              compact: true,
+                              display: ManualRuleProvenanceService.instance
+                                  .resolveMatchedRuleDisplay(
+                                serverKey: serverKey,
+                                ruleText: mr.text,
+                                filterListId: mr.filterListId,
+                                subscriptionDisplayName: mr.sourceName,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              mr.text,
+                              style: const TextStyle(
+                                fontFamily: 'monospace',
+                                fontSize: 12.5,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
+                    ],
                   ],
                 ],
               ),

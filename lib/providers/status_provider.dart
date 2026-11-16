@@ -10,17 +10,38 @@ import 'package:adguard_home_manager/constants/enums.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/functions/time_server_disabled.dart';
 import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
+import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
+
+class BlockUnblockOutcome {
+  final bool ok;
+  final bool conflictDetected;
+  final bool provenanceSaveFailed;
+  final bool readbackFailed;
+  final String? message;
+
+  const BlockUnblockOutcome({
+    required this.ok,
+    this.conflictDetected = false,
+    this.provenanceSaveFailed = false,
+    this.readbackFailed = false,
+    this.message,
+  });
+}
 
 class StatusProvider with ChangeNotifier {
   final DateTime Function() _nowProvider;
   final Future<bool> Function()? _onExpiredRefreshOverride;
+  final ManualRuleProvenanceService _provenanceService;
 
   StatusProvider({
     DateTime Function()? nowProvider,
     Future<bool> Function()? onExpiredRefreshOverride,
+    ManualRuleProvenanceService? provenanceService,
   })  : _nowProvider = nowProvider ?? DateTime.now,
-        _onExpiredRefreshOverride = onExpiredRefreshOverride;
+        _onExpiredRefreshOverride = onExpiredRefreshOverride,
+        _provenanceService =
+            provenanceService ?? ManualRuleProvenanceService.instance;
 
   ServersProvider? _serversProvider;
 
@@ -334,20 +355,31 @@ class StatusProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> blockUnblockDomain(
-      {required String domain, required String newStatus}) async {
-    if (_serverStatus == null) return false;
+  Future<BlockUnblockOutcome> blockUnblockDomainDetailed({
+    required String domain,
+    required String newStatus,
+    String entryPoint = '日志详情',
+  }) async {
+    if (_serverStatus == null) {
+      return const BlockUnblockOutcome(ok: false, message: '未加载服务器状态');
+    }
     final api = _serversProvider?.apiClient2;
-    if (api == null) return false;
+    if (api == null) {
+      return const BlockUnblockOutcome(ok: false, message: '未连接服务器');
+    }
 
     return ServerRuleWriteQueue.run(api.server, (session) async {
       final rules = await api.getFilteringRules();
       if (rules.successful != true || rules.content is! FilteringStatus) {
-        return false;
+        return const BlockUnblockOutcome(
+          ok: false,
+          message: '读取当前自定义规则失败，未修改任何规则',
+        );
       }
 
       FilteringStatus oldStatus = _serverStatus!.filteringStatus;
       final fetched = rules.content as FilteringStatus;
+      final beforeRules = List<String>.from(fetched.userRules);
 
       final exactRules = {
         "||$domain^",
@@ -355,7 +387,7 @@ class StatusProvider with ChangeNotifier {
         "@@||$domain^",
         "@@||$domain^\$important",
       };
-      List<String> newRules = fetched.userRules
+      List<String> newRules = beforeRules
           .where((d) => !exactRules.contains(d.trim()))
           .toList();
       if (newStatus == 'block') {
@@ -378,19 +410,76 @@ class StatusProvider with ChangeNotifier {
 
       if (result.successful == true) {
         session.bumpLocalEpoch();
+
+        // 写后回读最新规则状态并核对确实存在后再写入来源记录
+        final confirmRes = await api.getFilteringRules();
+        bool provenanceSaveFailed = false;
+        bool readbackFailed = false;
+        if (confirmRes.successful == true &&
+            confirmRes.content is FilteringStatus) {
+          final confirmed = confirmRes.content as FilteringStatus;
+          _filteringStatus = confirmed;
+          final saved = await _provenanceService.applyRuleListMutationDiff(
+            serverKey: session.serverKey,
+            rulesBefore: beforeRules,
+            rulesAfter: confirmed.userRules,
+            entryPoint: entryPoint,
+            confirmedRevision: result.userRulesRevisionHeader ??
+                confirmed.userRulesRevision,
+          );
+          if (!saved) {
+            provenanceSaveFailed = true;
+          }
+        } else {
+          readbackFailed = true;
+        }
+
         // 放行或拦截域名后立即清空 AGH 缓存和系统 DNS 缓存，无需等待 TTL 过期
         unawaited(api.resetDnsCache());
         if (Platform.isAndroid) {
           unawaited(ModuleConfigService().flushSystemDnsCache());
         }
-        return true;
+        notifyListeners();
+        return BlockUnblockOutcome(
+          ok: true,
+          provenanceSaveFailed: provenanceSaveFailed,
+          readbackFailed: readbackFailed,
+          message: provenanceSaveFailed
+              ? '规则已添加，但来源记录保存失败。'
+              : (readbackFailed ? '规则已提交，但回读确认 Core 状态失败，暂未写入已确认来源记录' : null),
+        );
       } else {
         if (result.statusCode == 409) {
-          await getFilteringRules();
+          final refreshed = await api.getFilteringRules();
+          if (refreshed.successful == true &&
+              refreshed.content is FilteringStatus) {
+            final fs = refreshed.content as FilteringStatus;
+            _filteringStatus = fs;
+            await _provenanceService.syncWithCoreRules(
+              serverKey: session.serverKey,
+              coreRules: fs.userRules,
+            );
+          }
+          notifyListeners();
+          return const BlockUnblockOutcome(
+            ok: false,
+            conflictDetected: true,
+            message: '检测到其他客户端同时修改了自定义规则（版本冲突），已重新读取最新列表，请确认后重试',
+          );
         }
         _filteringStatus = oldStatus;
-        return false;
+        notifyListeners();
+        return const BlockUnblockOutcome(ok: false, message: '提交规则失败');
       }
     });
+  }
+
+  Future<bool> blockUnblockDomain(
+      {required String domain, required String newStatus}) async {
+    final res = await blockUnblockDomainDetailed(
+      domain: domain,
+      newStatus: newStatus,
+    );
+    return res.ok;
   }
 }

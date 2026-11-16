@@ -17,9 +17,11 @@ import 'package:adguard_home_manager/providers/dns_provider.dart';
 import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
+import 'package:adguard_home_manager/screens/filters/my_manual_rules_screen.dart';
 import 'package:adguard_home_manager/screens/settings/module/app_allowlist_modal.dart';
 import 'package:adguard_home_manager/services/domain_input_parser.dart';
 import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
+import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
 
 /// 极简内嵌式模块快捷操作区（内嵌于首页顶部保护主卡片中）：
@@ -616,6 +618,7 @@ class _FalsePositiveAssistantModalState
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    ManualRuleProvenanceService.instance.ensureLoaded();
     _ruleSearchCoordinator = RuleSearchCoordinator(
       executor: (keyword) => ModuleConfigService().searchFilterRules(keyword),
       onResult: (generation, keyword, matches, stillSearching) {
@@ -1271,7 +1274,9 @@ class _FalsePositiveAssistantModalState
     showSnackbar(
       appConfigProvider: appConfigProvider,
       label: outcome.message,
-      color: outcome.verifiedUnblocked && !outcome.cacheFlushFailed
+      color: outcome.verifiedUnblocked &&
+              !outcome.cacheFlushFailed &&
+              !outcome.provenanceSaveFailed
           ? Colors.green
           : (outcome.writeSucceeded ? Colors.orange : Colors.red),
     );
@@ -1596,9 +1601,21 @@ class _FalsePositiveAssistantModalState
             report: _liveCheckReport,
             outcomesByRule: _exceptionOutcomes,
             writeBusy: _writingException,
+            serverKey: ManualRuleProvenanceService.serverKeyForNullable(
+              Provider.of<ServersProvider>(context, listen: false)
+                  .selectedServer,
+            ),
             onApplyException: (rule, {required confirmBroad}) =>
                 _applyExceptionRule(rule, confirmBroad: confirmBroad),
             onUndoException: _undoExceptionRule,
+            onOpenMyManualRules: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const MyManualRulesScreen(),
+                ),
+              );
+            },
           ),
         const Divider(height: 1),
         Expanded(

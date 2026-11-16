@@ -8,6 +8,7 @@ import 'package:adguard_home_manager/models/logs.dart';
 import 'package:adguard_home_manager/models/server.dart';
 import 'package:adguard_home_manager/services/api_client.dart';
 import 'package:adguard_home_manager/services/domain_input_parser.dart';
+import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
 
 /// 实时规则检测状态（严格区分查询失败/不支持/未知结果、重写与真实放行）。
 enum RuleCheckStatus {
@@ -1078,6 +1079,7 @@ class ExceptionWriteOutcome {
   final bool verificationIncomplete;
   final bool cacheFlushFailed;
   final bool conflictDetected;
+  final bool provenanceSaveFailed;
   final String? addedRule;
   final ExceptionUndoToken? undoToken;
   final String? undoDisabledReason;
@@ -1093,6 +1095,7 @@ class ExceptionWriteOutcome {
     this.verificationIncomplete = false,
     this.cacheFlushFailed = false,
     this.conflictDetected = false,
+    this.provenanceSaveFailed = false,
     this.addedRule,
     this.undoToken,
     this.undoDisabledReason,
@@ -1121,6 +1124,8 @@ class ExceptionRuleCoordinator {
     FutureOr<Object?> Function()? flushSystemDnsCache,
     Map<int, String> filterNames = const {},
     Map<int, String> whitelistNames = const {},
+    String entryPoint = '误杀排错',
+    ManualRuleProvenanceService? provenanceService,
   }) {
     return ServerRuleWriteQueue.run(apiClient.server, (session) async {
       final cleanRule = exceptionRule.trim();
@@ -1148,6 +1153,8 @@ class ExceptionRuleCoordinator {
       String? addedRule;
       ExceptionUndoToken? undoToken;
       String? undoDisabledReason;
+      var provenanceSaveFailed = false;
+      final prov = provenanceService ?? ManualRuleProvenanceService.instance;
       if (!alreadyExists) {
         final updatedRules = List<String>.from(existingRules)..add(cleanRule);
         final expectedSubmittedFp =
@@ -1182,7 +1189,7 @@ class ExceptionRuleCoordinator {
         // 2) 回读 /filtering/status，严格核对提交 revision、完整规则逐项一致与新增槽位，绝不回滚或覆盖其他客户端修改
         final confirmRes = await apiClient.getFiltering();
         if (!confirmRes.successful || confirmRes.content is! Filtering) {
-          undoDisabledReason = '回读确认核心状态失败，无法确认撤销归属，暂不提供自动撤销';
+          undoDisabledReason = '回读确认核心状态失败，无法确认撤销归属，暂不提供自动撤销；未确认写入前不记录手动来源';
         } else {
           final confirmedData = confirmRes.content as Filtering;
           final confirmedRules = List<String>.from(confirmedData.userRules);
@@ -1191,6 +1198,21 @@ class ExceptionRuleCoordinator {
               ServerRuleWriteQueue.fingerprintRules(confirmedRules);
           final slotMatches = addedIdx < confirmedRules.length &&
               confirmedRules[addedIdx].trim() == cleanRule;
+
+          // 只有回读中真实包含该新增规则才记录手动来源；即使来源库写盘失败，也不回滚用户已确认写入的 Core 规则。
+          if (confirmedRules.any((r) => r.trim() == cleanRule)) {
+            final saved = await prov.recordManualAdditions(
+              serverKey: session.serverKey,
+              addedRules: [cleanRule],
+              entryPoint: entryPoint,
+              confirmedRevision: committedRev ?? readbackRev,
+              coreCountsAfterWrite:
+                  RuleListDiffResult.countExactRules(confirmedRules),
+            );
+            if (!saved) {
+              provenanceSaveFailed = true;
+            }
+          }
 
           if (committedRev == null || committedRev.isEmpty) {
             // 旧核心不返回提交 revision：保守不签发跨客户端撤销凭证，仍继续实时规则检测
@@ -1218,10 +1240,14 @@ class ExceptionRuleCoordinator {
       }
 
       String withUndoNotice(String baseMessage) {
-        if (undoDisabledReason == null || undoDisabledReason.isEmpty) {
-          return baseMessage;
+        var msg = baseMessage;
+        if (provenanceSaveFailed) {
+          msg = '规则已添加，但来源记录保存失败。$msg';
         }
-        return '$baseMessage（$undoDisabledReason）';
+        if (undoDisabledReason == null || undoDisabledReason.isEmpty) {
+          return msg;
+        }
+        return '$msg（$undoDisabledReason）';
       }
 
       // 3) 清理核心 DNS 缓存与 Android 系统缓存（失败按部分完成实报）
@@ -1286,6 +1312,7 @@ class ExceptionRuleCoordinator {
             verifiedUnblocked: false,
             stillBlockedByImportant: true,
             cacheFlushFailed: cacheFlushFailed,
+            provenanceSaveFailed: provenanceSaveFailed,
             addedRule: addedRule,
             undoToken: undoToken,
             undoDisabledReason: undoDisabledReason,
@@ -1300,6 +1327,7 @@ class ExceptionRuleCoordinator {
           writeSucceeded: true,
           verifiedUnblocked: false,
           cacheFlushFailed: cacheFlushFailed,
+          provenanceSaveFailed: provenanceSaveFailed,
           addedRule: addedRule,
           undoToken: undoToken,
           undoDisabledReason: undoDisabledReason,
@@ -1319,6 +1347,7 @@ class ExceptionRuleCoordinator {
           verifiedUnblocked: false,
           verificationIncomplete: false,
           cacheFlushFailed: cacheFlushFailed,
+          provenanceSaveFailed: provenanceSaveFailed,
           addedRule: addedRule,
           undoToken: undoToken,
           undoDisabledReason: undoDisabledReason,
@@ -1340,6 +1369,7 @@ class ExceptionRuleCoordinator {
             writeSucceeded: true,
             verifiedUnblocked: true,
             cacheFlushFailed: true,
+            provenanceSaveFailed: provenanceSaveFailed,
             addedRule: addedRule,
             undoToken: undoToken,
             undoDisabledReason: undoDisabledReason,
@@ -1354,6 +1384,7 @@ class ExceptionRuleCoordinator {
           writeSucceeded: true,
           verifiedUnblocked: true,
           cacheFlushFailed: false,
+          provenanceSaveFailed: provenanceSaveFailed,
           addedRule: addedRule,
           undoToken: undoToken,
           undoDisabledReason: undoDisabledReason,
@@ -1373,6 +1404,7 @@ class ExceptionRuleCoordinator {
         verifiedUnblocked: false,
         verificationIncomplete: true,
         cacheFlushFailed: cacheFlushFailed,
+        provenanceSaveFailed: provenanceSaveFailed,
         addedRule: addedRule,
         undoToken: undoToken,
         undoDisabledReason: undoDisabledReason,
@@ -1390,6 +1422,7 @@ class ExceptionRuleCoordinator {
     required String addedRule,
     ExceptionUndoToken? undoToken,
     FutureOr<Object?> Function()? flushSystemDnsCache,
+    ManualRuleProvenanceService? provenanceService,
   }) {
     return ServerRuleWriteQueue.run(apiClient.server, (session) async {
       final clean = addedRule.trim();
@@ -1462,6 +1495,13 @@ class ExceptionRuleCoordinator {
 
       session.bumpLocalEpoch();
       _lastTokensByRuleKey.remove(_tokenKey(session.serverKey, clean));
+
+      final prov = provenanceService ?? ManualRuleProvenanceService.instance;
+      await prov.markRuleRemovedFromCore(
+        serverKey: session.serverKey,
+        ruleText: clean,
+        confirmedRevision: saveRes.userRulesRevisionHeader,
+      );
 
       await apiClient.resetDnsCache();
       if (flushSystemDnsCache != null) {
