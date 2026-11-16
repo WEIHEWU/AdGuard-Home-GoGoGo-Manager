@@ -7,10 +7,14 @@ import 'package:adguard_home_manager/l10n/app_localizations.dart';
 import 'package:adguard_home_manager/screens/logs/log_tile.dart';
 import 'package:adguard_home_manager/widgets/floating_search_bar.dart';
 import 'package:adguard_home_manager/constants/enums.dart';
+import 'package:adguard_home_manager/functions/copy_clipboard.dart';
+import 'package:adguard_home_manager/functions/format_time.dart';
 import 'package:adguard_home_manager/functions/snackbar.dart';
 import 'package:adguard_home_manager/models/applied_filters.dart';
 import 'package:adguard_home_manager/providers/app_config_provider.dart';
+import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/logs_provider.dart';
+import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
 
 class Logs extends StatefulWidget {
   const Logs({super.key});
@@ -22,6 +26,7 @@ class Logs extends StatefulWidget {
 class _LogsState extends State<Logs> {
   final GlobalKey _searchButtonKey = GlobalKey();
   bool _clearing = false;
+  bool _aggregateDuplicates = true;
 
   @override
   void initState() {
@@ -29,6 +34,10 @@ class _LogsState extends State<Logs> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       Provider.of<LogsProvider>(context, listen: false).fetchLogs();
+      final fp = Provider.of<FilteringProvider>(context, listen: false);
+      if (fp.filtering == null) {
+        fp.fetchFilters(showLoading: false);
+      }
     });
   }
 
@@ -80,9 +89,23 @@ class _LogsState extends State<Logs> {
   @override
   Widget build(BuildContext context) {
     final logsProvider = Provider.of<LogsProvider>(context);
+    final filteringProvider = Provider.of<FilteringProvider>(context);
     final l10n = AppLocalizations.of(context)!;
     final colorScheme = Theme.of(context).colorScheme;
     final items = logsProvider.logsData?.data ?? const [];
+    final filterNames = RuleBatchChecker.buildFilterNameMap(
+      filteringProvider.filtering?.filters ?? const [],
+    );
+    final whitelistNames = RuleBatchChecker.buildFilterNameMap(
+      filteringProvider.filtering?.whitelistFilters ?? const [],
+    );
+    final aggregated = _aggregateDuplicates
+        ? BlockedEventAggregator.aggregateRawLogs(
+            items,
+            filterNames: filterNames,
+            whitelistNames: whitelistNames,
+          )
+        : const <AggregatedLogGroup>[];
 
     return Scaffold(
       appBar: AppBar(
@@ -162,6 +185,18 @@ class _LogsState extends State<Logs> {
                       },
                     ),
                   ),
+                Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: FilterChip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text(
+                      _aggregateDuplicates ? '聚合重复' : '原始逐条',
+                      style: const TextStyle(fontSize: 12.5),
+                    ),
+                    selected: _aggregateDuplicates,
+                    onSelected: (v) => setState(() => _aggregateDuplicates = v),
+                  ),
+                ),
               ],
             ),
           ),
@@ -204,21 +239,46 @@ class _LogsState extends State<Logs> {
                     ),
                   ],
                 )
-              : ListView.builder(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  itemCount: items.length,
-                  addAutomaticKeepAlives: false,
-                  itemBuilder: (context, index) {
-                    final log = items[index];
-                    if (log.question.name == null) {
-                      return const SizedBox.shrink();
-                    }
-                    return LogTile(
-                      key: ValueKey('${log.time.microsecondsSinceEpoch}_$index'),
-                      log: log,
-                    );
-                  },
-                ),
+              : _aggregateDuplicates
+                  ? ListView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      itemCount: aggregated.length,
+                      addAutomaticKeepAlives: false,
+                      itemBuilder: (context, index) {
+                        final group = aggregated[index];
+                        if (group.count <= 1 && group.rawEvents.isNotEmpty) {
+                          return LogTile(
+                            key: ValueKey(
+                                '${group.time.microsecondsSinceEpoch}_$index'),
+                            log: group.rawEvents.first,
+                            filterNames: filterNames,
+                            whitelistNames: whitelistNames,
+                          );
+                        }
+                        return _AggregatedLogsPageTile(
+                          group: group,
+                          filterNames: filterNames,
+                          whitelistNames: whitelistNames,
+                        );
+                      },
+                    )
+                  : ListView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      itemCount: items.length,
+                      addAutomaticKeepAlives: false,
+                      itemBuilder: (context, index) {
+                        final log = items[index];
+                        if (log.question.name == null) {
+                          return const SizedBox.shrink();
+                        }
+                        return LogTile(
+                          key: ValueKey('${log.time.microsecondsSinceEpoch}_$index'),
+                          log: log,
+                          filterNames: filterNames,
+                          whitelistNames: whitelistNames,
+                        );
+                      },
+                    ),
           LoadStatus.error => Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -237,6 +297,145 @@ class _LogsState extends State<Logs> {
             ),
         },
       ),
+    );
+  }
+}
+
+class _AggregatedLogsPageTile extends StatelessWidget {
+  final AggregatedLogGroup group;
+  final Map<int, String> filterNames;
+  final Map<int, String> whitelistNames;
+
+  const _AggregatedLogsPageTile({
+    required this.group,
+    required this.filterNames,
+    required this.whitelistNames,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final badgeColor = group.isSni ? Colors.purple : Colors.blue;
+    final protoLabel = group.isSni ? 'SNI' : 'DNS';
+    final timeStr = convertTimestampLocalTimezone(group.time, 'HH:mm:ss');
+    final ruleHint = group.matchedRules.isNotEmpty
+        ? '${group.matchedRules.first.sourceName}: ${group.matchedRules.first.text}'
+        : group.reason;
+
+    return ListTile(
+      onTap: () {
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text(group.domain, style: const TextStyle(fontSize: 15.5)),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('来源: $protoLabel · reason=${group.reason} · 重复 ${group.count} 次'),
+                    if (group.matchedRules.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      const Text('命中规则:', style: TextStyle(fontWeight: FontWeight.w600)),
+                      for (final r in group.matchedRules)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 3),
+                          child: Text(
+                            '[${r.sourceName}] ${r.text}',
+                            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                          ),
+                        ),
+                    ],
+                    const SizedBox(height: 10),
+                    const Text('原始事件详情:', style: TextStyle(fontWeight: FontWeight.w600)),
+                    for (final raw in group.rawEvents.take(20))
+                      Padding(
+                        padding: const EdgeInsets.only(top: 3),
+                        child: Text(
+                          '${convertTimestampLocalTimezone(raw.time, "HH:mm:ss.SSS")} · client=${raw.client}${raw.destination?.isNotEmpty == true ? " · dst=${raw.destination}" : ""}',
+                          style: const TextStyle(fontSize: 11.5),
+                        ),
+                      ),
+                    if (group.rawEvents.length > 20)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text('仅展示前 20 条（共 ${group.rawEvents.length} 条）',
+                            style: TextStyle(fontSize: 11, color: colorScheme.onSurfaceVariant)),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  copyToClipboard(
+                    value: group.domain,
+                    successMessage: AppLocalizations.of(context)!.copiedClipboard,
+                  );
+                },
+                child: Text(AppLocalizations.of(context)!.copyClipboard),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('关闭'),
+              ),
+            ],
+          ),
+        );
+      },
+      title: Text(
+        group.domain,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+      ),
+      subtitle: Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: badgeColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                protoLabel,
+                style: TextStyle(
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.bold,
+                  color: badgeColor,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              '$timeStr · 重复 ${group.count} 次',
+              style: TextStyle(
+                color: colorScheme.onSurfaceVariant,
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '· $ruleHint',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: colorScheme.onSurfaceVariant,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      trailing: const Icon(Icons.expand_more_rounded, size: 18),
     );
   }
 }

@@ -1,5 +1,7 @@
 // ignore_for_file: use_build_context_synchronously
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -14,6 +16,7 @@ import 'package:adguard_home_manager/classes/process_modal.dart';
 import 'package:adguard_home_manager/constants/enums.dart';
 import 'package:adguard_home_manager/functions/clear_dns_cache.dart';
 import 'package:adguard_home_manager/functions/snackbar.dart';
+import 'package:adguard_home_manager/widgets/module_diagnostics_sheet.dart';
 import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/providers/dns_provider.dart';
 import 'package:adguard_home_manager/providers/filtering_provider.dart';
@@ -83,20 +86,29 @@ class _DnsSettingsState extends State<DnsSettings> {
         Provider.of<AppConfigProvider>(context, listen: false);
     final service = ModuleConfigService();
 
-    final ok = await service.switchRunMode(targetMode);
-    final addr = await service.readHttpAddress();
-    if (addr != null &&
-        addr.isNotEmpty &&
-        addr != appConfigProvider.moduleHttpAddress) {
-      appConfigProvider.setModuleHttpAddress(addr);
-      await serversProvider.autoConnectModule(addr);
-    }
-    await Future.delayed(const Duration(milliseconds: 300));
-    final fetched = await dnsProvider.fetchDnsData(showLoading: false);
+    final switchRes = await service.switchRunModeDetailed(targetMode);
+    final refreshSw = Stopwatch()..start();
+    final currentAddr = appConfigProvider.moduleHttpAddress;
+    final portMatched = switchRes.httpPort != null &&
+        switchRes.httpPort! > 0 &&
+        currentAddr.isNotEmpty &&
+        currentAddr.endsWith(':${switchRes.httpPort}');
+    var fetched = false;
     await Future.wait([
+      if (!portMatched)
+        service.readHttpAddress().then((addr) async {
+          if (addr != null &&
+              addr.isNotEmpty &&
+              addr != appConfigProvider.moduleHttpAddress) {
+            appConfigProvider.setModuleHttpAddress(addr);
+            await serversProvider.autoConnectModule(addr);
+          }
+        }),
+      dnsProvider.fetchDnsData(showLoading: false).then((v) => fetched = v),
       filteringProvider.fetchFilters(showLoading: false),
       statusProvider.getServerStatus(withLoadingIndicator: false),
     ]);
+    refreshSw.stop();
 
     if (!mounted) return;
     setState(() {
@@ -106,13 +118,44 @@ class _DnsSettingsState extends State<DnsSettings> {
         _applyInfo(dnsProvider.dnsInfo!);
       }
     });
+    if (switchRes.opId != null) {
+      unawaited(service.recordManagerModeSwitchTimings(
+        opId: switchRes.opId!,
+        managerScriptWaitMs: switchRes.managerScriptWaitMs,
+        managerRefreshMs: refreshSw.elapsedMilliseconds,
+        status: switchRes.succeeded ? 'ok' : 'error',
+      ));
+    }
 
     final modeLabel =
         targetMode == 'cn' ? '🇨🇳 国内模式 (CN)' : '🌐 海外模式 (Overseas)';
+    if (switchRes.unconfirmed) {
+      showSnackbar(
+        appConfigProvider: appConfigProvider,
+        label: '执行结果未确认，已同步当前实际状态',
+        color: Colors.orange,
+        actionLabel: '导出诊断包',
+        onAction: () {
+          if (mounted) showDiagnosticExportFlow(context, isZhOverride: true);
+        },
+      );
+      return;
+    }
+    final ok = switchRes.succeeded;
     showSnackbar(
       appConfigProvider: appConfigProvider,
-      label: ok ? '已成功切换至 $modeLabel' : '模式切换失败，请检查 Root 权限',
+      label: ok
+          ? '已成功切换至 $modeLabel'
+          : '模式切换失败（${switchRes.stage}），已保持原状态',
       color: ok ? Colors.green : Colors.red,
+      actionLabel: ok ? null : '导出诊断包',
+      onAction: ok
+          ? null
+          : () {
+              if (mounted) {
+                showDiagnosticExportFlow(context, isZhOverride: true);
+              }
+            },
     );
   }
 

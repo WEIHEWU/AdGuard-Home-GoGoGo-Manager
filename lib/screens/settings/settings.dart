@@ -7,6 +7,7 @@ import 'package:adguard_home_manager/screens/settings/module/app_allowlist_modal
 import 'package:adguard_home_manager/widgets/section_label.dart';
 import 'package:adguard_home_manager/widgets/custom_list_tile.dart';
 import 'package:adguard_home_manager/functions/snackbar.dart';
+import 'package:adguard_home_manager/widgets/module_diagnostics_sheet.dart';
 import 'package:adguard_home_manager/models/filtering_status.dart';
 import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
@@ -117,8 +118,13 @@ class _SettingsWidgetState extends State<Settings> {
     final service = ModuleConfigService();
     final appConfigProvider =
         Provider.of<AppConfigProvider>(context, listen: false);
-    String logs = await service.readModuleLogs(maxLines: 150);
-    await _loadDiagnostics(forceRefresh: true);
+    final results = await Future.wait([
+      service.readModuleLogs(maxLines: 150),
+      service.readDebugLogConfig(),
+      _loadDiagnostics(forceRefresh: true),
+    ]);
+    String logs = results[0] as String;
+    DebugLogConfig debugCfg = results[1] as DebugLogConfig;
     if (!mounted) return;
 
     showDialog(
@@ -126,8 +132,13 @@ class _SettingsWidgetState extends State<Settings> {
       barrierColor: Colors.black.withValues(alpha: 0.5),
       builder: (ctx) {
         bool reloading = false;
+        bool togglingDebug = false;
+        int selectedDurationMin = DebugLogConfig.defaultDurationMinutes;
         return StatefulBuilder(
           builder: (ctx, setModalState) {
+            final now = DateTime.now();
+            final debugActive = debugCfg.isActiveAt(now);
+            final remMin = debugCfg.remainingMinutesAt(now);
             return AlertDialog(
               title: Text(isZh ? '模块自检与运行日志' : 'Module Diagnostics & Logs'),
               content: SizedBox(
@@ -150,9 +161,140 @@ class _SettingsWidgetState extends State<Settings> {
                             : Colors.orange,
                       ),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 10),
                     Container(
-                      height: 260,
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(ctx)
+                            .colorScheme
+                            .surfaceContainerHighest
+                            .withValues(alpha: 0.45),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  isZh ? '详细调试日志' : 'Detailed Debug Log',
+                                  style: const TextStyle(
+                                    fontSize: 13.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                              if (!debugActive)
+                                DropdownButton<int>(
+                                  value: selectedDurationMin,
+                                  isDense: true,
+                                  underline: const SizedBox.shrink(),
+                                  items: DebugLogConfig
+                                      .selectableDurationsMinutes
+                                      .map(
+                                        (m) => DropdownMenuItem<int>(
+                                          value: m,
+                                          child: Text(
+                                            isZh ? '$m 分钟' : '${m}m',
+                                            style:
+                                                const TextStyle(fontSize: 12),
+                                          ),
+                                        ),
+                                      )
+                                      .toList(),
+                                  onChanged: togglingDebug
+                                      ? null
+                                      : (val) {
+                                          if (val != null) {
+                                            setModalState(() =>
+                                                selectedDurationMin = val);
+                                          }
+                                        },
+                                ),
+                              const SizedBox(width: 6),
+                              Switch(
+                                value: debugActive,
+                                onChanged: togglingDebug
+                                    ? null
+                                    : (nextVal) async {
+                                        setModalState(
+                                            () => togglingDebug = true);
+                                        final updated =
+                                            await service.setDebugLogConfig(
+                                          enabled: nextVal,
+                                          durationMinutes: selectedDurationMin,
+                                        );
+                                        if (!ctx.mounted) return;
+                                        setModalState(() {
+                                          togglingDebug = false;
+                                          if (updated != null) {
+                                            debugCfg = updated;
+                                          }
+                                        });
+                                        if (mounted) {
+                                          showSnackbar(
+                                            appConfigProvider:
+                                                appConfigProvider,
+                                            label: updated == null
+                                                ? (isZh
+                                                    ? '保存调试日志开关失败'
+                                                    : 'Failed to save debug setting')
+                                                : (nextVal
+                                                    ? (isZh
+                                                        ? '已开启详细调试日志（$selectedDurationMin 分钟后自动关闭，不影响核心/防火墙）'
+                                                        : 'Debug logging enabled (${selectedDurationMin}m auto-off)')
+                                                    : (isZh
+                                                        ? '已关闭详细调试日志（重要错误仍保留记录）'
+                                                        : 'Debug logging disabled')),
+                                            color: updated == null
+                                                ? Colors.red
+                                                : Colors.green,
+                                          );
+                                        }
+                                      },
+                              ),
+                            ],
+                          ),
+                          Text(
+                            isZh
+                                ? '临时记录操作阶段及错误信息，便于排查问题。不记录 DNS 查询历史。建议排查后关闭。'
+                                : 'Temporarily records stage & error details. Never records DNS query history. Disable after troubleshooting.',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: Theme.of(ctx)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            debugActive
+                                ? (isZh
+                                    ? '当前已开启 · 约 $remMin 分钟后自动关闭 · 不影响 AdGuard Home 查询日志开关'
+                                    : 'Active · auto-off in ~${remMin}m · independent from AGH query log')
+                                : (isZh
+                                    ? '仅控制模块脚本调试输出，不改变 AdGuard Home 查询日志开关。'
+                                    : 'Module script debug only; does not alter AGH query log setting.'),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: debugActive
+                                  ? Colors.orange.shade700
+                                  : Theme.of(ctx)
+                                      .colorScheme
+                                      .onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      height: 230,
                       width: double.maxFinite,
                       padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(
@@ -181,6 +323,13 @@ class _SettingsWidgetState extends State<Settings> {
                 ),
               ),
               actions: [
+                TextButton.icon(
+                  onPressed: () {
+                    showDiagnosticExportFlow(ctx, isZhOverride: isZh);
+                  },
+                  icon: const Icon(Icons.archive_outlined, size: 17),
+                  label: Text(isZh ? '导出诊断包' : 'Export Bundle'),
+                ),
                 TextButton(
                   onPressed: reloading
                       ? null
@@ -241,9 +390,14 @@ class _SettingsWidgetState extends State<Settings> {
                 ),
                 TextButton(
                   onPressed: () async {
-                    await _loadDiagnostics(forceRefresh: true);
-                    logs = await service.readModuleLogs(maxLines: 150);
-                    setModalState(() {});
+                    final refreshed = await Future.wait([
+                      service.readModuleLogs(maxLines: 150),
+                      service.readDebugLogConfig(),
+                      _loadDiagnostics(forceRefresh: true),
+                    ]);
+                    logs = refreshed[0] as String;
+                    debugCfg = refreshed[1] as DebugLogConfig;
+                    if (ctx.mounted) setModalState(() {});
                   },
                   child: Text(isZh ? '刷新' : 'Refresh'),
                 ),

@@ -14,13 +14,18 @@ import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/functions/get_filtered_status.dart';
 import 'package:adguard_home_manager/models/logs.dart';
 import 'package:adguard_home_manager/functions/format_time.dart';
+import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
 
 class LogTile extends StatelessWidget {
   final Log log;
+  final Map<int, String> filterNames;
+  final Map<int, String> whitelistNames;
 
   const LogTile({
     super.key,
     required this.log,
+    this.filterNames = const {},
+    this.whitelistNames = const {},
   });
 
   @override
@@ -34,16 +39,19 @@ class LogTile extends StatelessWidget {
     final filter =
         getFilteredStatus(context, appConfigProvider, log.reason, false);
     final domainBlocked = isDomainBlocked(log.reason);
-    final isSniLog = log.reason == 'FilteredSNI' ||
-        log.reason == 'NotFilteredSNI' ||
-        log.question.type.toUpperCase() == 'SNI' ||
-        (log.clientProto?.toLowerCase().contains('sni') ?? false);
+    final isSniLog = BlockedEventAggregator.isSniEvent(log);
 
     final badgeColor = isSniLog ? Colors.purple : Colors.blue;
     final badgeLabel = isSniLog
         ? 'SNI'
         : (log.question.type.isNotEmpty ? log.question.type : 'DNS');
-    final ruleHint = log.rules.isNotEmpty ? log.rules.first.text : '';
+    final matchedRules = BlockedEventAggregator.extractRulesFromLog(
+      log,
+      filterNames: filterNames,
+      whitelistNames: whitelistNames,
+    );
+    final ruleHint =
+        matchedRules.isNotEmpty ? matchedRules.first.text : '';
     String? elapsedText;
     if (log.elapsedMs.isNotEmpty) {
       final parsed = double.tryParse(log.elapsedMs);
@@ -116,16 +124,27 @@ class LogTile extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('状态: ${filter['label']}'),
-                  if (ruleHint.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Text(
-                      '命中规则: $ruleHint',
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 12.5,
-                      ),
+                  Text('状态: ${filter['label']} (${log.reason})'),
+                  if (log.predictedBlocked) ...[
+                    const SizedBox(height: 4),
+                    const Text(
+                      '规则预测: 规则命中阻断，但因保护暂停实际已放行',
+                      style: TextStyle(fontSize: 12, color: Colors.orange),
                     ),
+                  ],
+                  if (matchedRules.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    for (final mr in matchedRules)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          '[${mr.sourceName}] ${mr.text}',
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 12.5,
+                          ),
+                        ),
+                      ),
                   ],
                 ],
               ),

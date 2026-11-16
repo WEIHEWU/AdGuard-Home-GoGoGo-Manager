@@ -10,6 +10,11 @@ typedef SuProcessRunner = Future<ProcessResult> Function(
   List<String> arguments,
 );
 
+typedef SuProcessStarter = Future<Process> Function(
+  String executable,
+  List<String> arguments,
+);
+
 typedef SuProbeCandidateRunner = Future<ProcessResult?> Function(
   String executable,
   Duration timeout,
@@ -87,6 +92,17 @@ class ModeSwitchResult {
   final String mode;
   final String targetMode;
   final String message;
+  final String? opId;
+  final int? httpPort;
+  final int? dnsPort;
+  /// 模块脚本自身从启动到返回的总耗时（与管理器侧计时分开）
+  final int? totalMs;
+  /// 管理器队列等待耗时（Stopwatch 测量）
+  final int? managerQueueWaitMs;
+  /// 管理器等待 su/switch_mode.sh 返回耗时（Stopwatch 测量）
+  final int? managerScriptWaitMs;
+
+  int? get scriptTotalMs => totalMs;
 
   const ModeSwitchResult({
     required this.succeeded,
@@ -95,12 +111,21 @@ class ModeSwitchResult {
     this.mode = 'overseas',
     String? targetMode,
     this.message = '',
+    this.opId,
+    this.httpPort,
+    this.dnsPort,
+    this.totalMs,
+    this.managerQueueWaitMs,
+    this.managerScriptWaitMs,
   }) : targetMode = targetMode ?? mode;
 
   factory ModeSwitchResult.fromScriptOutput({
     required int exitCode,
     required String stdoutText,
     required String targetMode,
+    String? fallbackOpId,
+    int? managerQueueWaitMs,
+    int? managerScriptWaitMs,
   }) {
     for (final rawLine in stdoutText.split('\n').reversed) {
       final line = rawLine.trim();
@@ -123,6 +148,12 @@ class ModeSwitchResult {
         mode: mode,
         targetMode: targetMode,
         message: ok ? '已成功切换模式' : '模式切换失败 ($stage)',
+        opId: fields['op_id'] ?? fallbackOpId,
+        httpPort: int.tryParse(fields['http_port'] ?? ''),
+        dnsPort: int.tryParse(fields['dns_port'] ?? ''),
+        totalMs: int.tryParse(fields['total_ms'] ?? ''),
+        managerQueueWaitMs: managerQueueWaitMs,
+        managerScriptWaitMs: managerScriptWaitMs,
       );
     }
     final ok = exitCode == 0;
@@ -133,18 +164,85 @@ class ModeSwitchResult {
       mode: targetMode,
       targetMode: targetMode,
       message: ok ? '已成功切换模式' : '模式切换失败',
+      opId: fallbackOpId,
+      managerQueueWaitMs: managerQueueWaitMs,
+      managerScriptWaitMs: managerScriptWaitMs,
     );
+  }
+}
+
+class ModuleOperationRecord {
+  /// 模块最近操作记录（内存环形缓冲，最多 20 条，不含 URL/密码/规则原文）
+  final DateTime timestamp;
+  final String type;
+  final String opId;
+  final String target;
+  final String stage;
+  final int exitCode;
+  final bool succeeded;
+  final bool unconfirmed;
+  final int? elapsedMs;
+
+  const ModuleOperationRecord({
+    required this.timestamp,
+    required this.type,
+    required this.opId,
+    required this.target,
+    required this.stage,
+    required this.exitCode,
+    required this.succeeded,
+    this.unconfirmed = false,
+    this.elapsedMs,
+  });
+
+  String toSummaryLine() {
+    final ts = timestamp.toUtc().toIso8601String();
+    final msPart = elapsedMs != null ? ' elapsed=${elapsedMs}ms' : '';
+    final uncPart = unconfirmed ? ' unconfirmed=1' : '';
+    return '$ts type=$type op_id=$opId target=$target stage=$stage exit=$exitCode ok=$succeeded$uncPart$msPart';
+  }
+}
+
+/// 详细调试日志开关配置（独立存储于 /data/adb/agh/diag.conf，默认关闭）
+class DebugLogConfig {
+  static const int defaultDurationMinutes = 30;
+  static const List<int> selectableDurationsMinutes = <int>[15, 30, 60, 180];
+
+  final bool enabled;
+  final int expireEpochSeconds;
+  final bool readable;
+
+  const DebugLogConfig({
+    this.enabled = false,
+    this.expireEpochSeconds = 0,
+    this.readable = true,
+  });
+
+  bool isActiveAt(DateTime now) {
+    if (!enabled || expireEpochSeconds <= 0) return false;
+    final nowSec = now.millisecondsSinceEpoch ~/ 1000;
+    return nowSec > 0 && nowSec < expireEpochSeconds;
+  }
+
+  bool get isActive => isActiveAt(DateTime.now());
+
+  int remainingMinutesAt(DateTime now) {
+    if (!isActiveAt(now)) return 0;
+    final nowSec = now.millisecondsSinceEpoch ~/ 1000;
+    return ((expireEpochSeconds - nowSec + 59) ~/ 60).clamp(1, 9999);
   }
 }
 
 class _ModeSwitchQueueEntry {
   final String targetMode;
-  final Future<ModeSwitchResult> Function() executor;
+  final Stopwatch enqueuedAt;
+  final Future<ModeSwitchResult> Function(int queueWaitMs) executor;
   final Completer<ModeSwitchResult> completer = Completer<ModeSwitchResult>();
   bool started = false;
 
   _ModeSwitchQueueEntry({
     required this.targetMode,
+    required this.enqueuedAt,
     required this.executor,
   });
 }
@@ -237,6 +335,8 @@ class RuleSearchCoordinator {
 class ModuleConfigService {
   static const String moduleConfigPath = '/data/adb/agh/scripts/config.prop';
   static const String moduleYamlPath = '/data/adb/agh/bin/AdGuardHome.yaml';
+  static const String diagConfigPath = '/data/adb/agh/diag.conf';
+  static const String diagLogHelperPath = '/data/adb/agh/scripts/diag_log.sh';
   static const MethodChannel _installedAppsChannel =
       MethodChannel('com.wu.adgogogo/installed_apps');
 
@@ -260,8 +360,25 @@ class ModuleConfigService {
   static final List<_ModeSwitchQueueEntry> _modeSwitchQueue =
       <_ModeSwitchQueueEntry>[];
   static bool _drainingModeSwitchQueue = false;
+  static final List<ModuleOperationRecord> _operationHistory =
+      <ModuleOperationRecord>[];
+  static const int _maxOperationHistory = 20;
+
+  static List<ModuleOperationRecord> get recentOperations =>
+      List<ModuleOperationRecord>.unmodifiable(_operationHistory);
+
+  static void recordOperation(ModuleOperationRecord record) {
+    _operationHistory.add(record);
+    if (_operationHistory.length > _maxOperationHistory) {
+      _operationHistory.removeRange(
+        0,
+        _operationHistory.length - _maxOperationHistory,
+      );
+    }
+  }
 
   final SuProcessRunner _processRunner;
+  final SuProcessStarter? _processStarter;
   final SuProbeCandidateRunner? _probeCandidateRunner;
   final Duration _suProbeTimeout;
   final Duration _mutationWaitTimeout;
@@ -269,11 +386,13 @@ class ModuleConfigService {
 
   ModuleConfigService({
     SuProcessRunner? processRunner,
+    SuProcessStarter? processStarter,
     SuProbeCandidateRunner? probeCandidateRunner,
     Duration suProbeTimeout = const Duration(seconds: 3),
     Duration mutationWaitTimeout = const Duration(seconds: 25),
     bool? isAndroidOverride,
   })  : _processRunner = processRunner ?? Process.run,
+        _processStarter = processStarter,
         _probeCandidateRunner = probeCandidateRunner,
         _suProbeTimeout = suProbeTimeout,
         _mutationWaitTimeout = mutationWaitTimeout,
@@ -294,10 +413,144 @@ class ModuleConfigService {
     _inFlightRepairOp = null;
     _modeSwitchQueue.clear();
     _drainingModeSwitchQueue = false;
+    _operationHistory.clear();
   }
 
   static const String _pathPrefix =
       'export PATH="/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:\$PATH"; ';
+
+  /// 使用受控子进程捕获 stdout/stderr 并在超时后按 SIGTERM -> SIGKILL 终止且释放流订阅
+  static Future<
+      ({
+        int pid,
+        int exitCode,
+        String stdout,
+        String stderr,
+        bool timedOut,
+        bool exitConfirmed,
+        bool truncated,
+      })> _executeProcessBounded(
+    Process process, {
+    required Duration timeout,
+    required int maxOutputBytes,
+    int maxErrBytes = 8192,
+  }) async {
+    final outBuf = StringBuffer();
+    final errBuf = StringBuffer();
+    var truncated = false;
+
+    final outDone = Completer<void>();
+    final errDone = Completer<void>();
+
+    late final StreamSubscription<String> outSub;
+    late final StreamSubscription<String> errSub;
+
+    outSub = process.stdout
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .listen(
+          (chunk) {
+            if (outBuf.length < maxOutputBytes) {
+              final remain = maxOutputBytes - outBuf.length;
+              outBuf.write(
+                chunk.length <= remain ? chunk : chunk.substring(0, remain),
+              );
+            } else {
+              truncated = true;
+            }
+          },
+          onError: (_) {
+            if (!outDone.isCompleted) outDone.complete();
+          },
+          onDone: () {
+            if (!outDone.isCompleted) outDone.complete();
+          },
+          cancelOnError: true,
+        );
+
+    errSub = process.stderr
+        .transform(const Utf8Decoder(allowMalformed: true))
+        .listen(
+          (chunk) {
+            if (errBuf.length < maxErrBytes) {
+              final remain = maxErrBytes - errBuf.length;
+              errBuf.write(
+                chunk.length <= remain ? chunk : chunk.substring(0, remain),
+              );
+            }
+          },
+          onError: (_) {
+            if (!errDone.isCompleted) errDone.complete();
+          },
+          onDone: () {
+            if (!errDone.isCompleted) errDone.complete();
+          },
+          cancelOnError: true,
+        );
+
+    var exitCode = 1;
+    var timedOut = false;
+    var exitConfirmed = false;
+
+    try {
+      try {
+        exitCode = await process.exitCode.timeout(timeout);
+        exitConfirmed = true;
+      } on TimeoutException {
+        timedOut = true;
+        exitCode = 124;
+        try {
+          process.kill(ProcessSignal.sigterm);
+        } catch (_) {}
+        try {
+          await process.exitCode.timeout(const Duration(milliseconds: 200));
+          exitConfirmed = true;
+        } on TimeoutException {
+          try {
+            process.kill(ProcessSignal.sigkill);
+          } catch (_) {}
+          try {
+            await process.exitCode.timeout(const Duration(milliseconds: 500));
+            exitConfirmed = true;
+          } on TimeoutException {
+            exitConfirmed = false;
+          } catch (_) {
+            exitConfirmed = false;
+          }
+        } catch (_) {
+          exitConfirmed = false;
+        }
+      } catch (_) {
+        exitCode = 1;
+      }
+
+      final drainWait = timedOut
+          ? const Duration(milliseconds: 150)
+          : const Duration(milliseconds: 200);
+      await Future.wait([outDone.future, errDone.future]).timeout(
+        drainWait,
+        onTimeout: () => const <void>[],
+      );
+    } finally {
+      await Future.wait([
+        Future.sync(() => outSub.cancel())
+            .timeout(const Duration(milliseconds: 100), onTimeout: () {}),
+        Future.sync(() => errSub.cancel())
+            .timeout(const Duration(milliseconds: 100), onTimeout: () {}),
+      ]);
+      if (!outDone.isCompleted) outDone.complete();
+      if (!errDone.isCompleted) errDone.complete();
+    }
+
+    return (
+      pid: process.pid,
+      exitCode: exitCode,
+      stdout: outBuf.toString(),
+      stderr: errBuf.toString(),
+      timedOut: timedOut,
+      exitConfirmed: exitConfirmed,
+      truncated: truncated,
+    );
+  }
 
   /// 使用可控 Process.start 执行只读 su 探测，并发消费 stdout/stderr 并在超时后终止且回收子进程
   static Future<ProcessResult?> defaultSuProbeCandidate(
@@ -311,58 +564,16 @@ class ModuleConfigService {
       return null;
     }
 
-    final stdoutBuffer = StringBuffer();
-    final stdoutDone = process.stdout
-        .transform(utf8.decoder)
-        .listen(
-          (chunk) {
-            if (stdoutBuffer.length < 256) {
-              stdoutBuffer.write(chunk);
-            }
-          },
-          onError: (_) {},
-        )
-        .asFuture<void>()
-        .catchError((_) {});
-    final stderrDone = process.stderr.drain<void>().catchError((_) {});
-
-    int exitCode;
-    try {
-      exitCode = await process.exitCode.timeout(timeout);
-    } on TimeoutException {
-      try {
-        process.kill(ProcessSignal.sigterm);
-      } catch (_) {}
-      try {
-        exitCode = await process.exitCode.timeout(
-          const Duration(milliseconds: 200),
-        );
-      } on TimeoutException {
-        try {
-          process.kill(ProcessSignal.sigkill);
-        } catch (_) {}
-        try {
-          exitCode = await process.exitCode.timeout(
-            const Duration(milliseconds: 500),
-          );
-        } catch (_) {
-          exitCode = -1;
-        }
-      }
-      await Future.wait([stdoutDone, stderrDone]).timeout(
-        const Duration(milliseconds: 100),
-        onTimeout: () => const <void>[],
-      );
-      return null;
-    } catch (_) {
+    final res = await _executeProcessBounded(
+      process,
+      timeout: timeout,
+      maxOutputBytes: 256,
+      maxErrBytes: 512,
+    );
+    if (res.timedOut) {
       return null;
     }
-
-    await Future.wait([stdoutDone, stderrDone]).timeout(
-      const Duration(milliseconds: 200),
-      onTimeout: () => const <void>[],
-    );
-    return ProcessResult(process.pid, exitCode, stdoutBuffer.toString(), '');
+    return ProcessResult(res.pid, res.exitCode, res.stdout, '');
   }
 
   Future<ProcessResult?> _runSingleSuProbe(String su) async {
@@ -482,6 +693,163 @@ class ModuleConfigService {
       return su != null;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// 带严格超时的只读诊断 Root 执行器（超时后主动 SIGTERM/SIGKILL 子进程、有界确认退出并释放流订阅）
+  Future<ProcessResult> runSuTimed(
+    String command, {
+    Duration timeout = const Duration(seconds: 4),
+    int maxOutputBytes = 393216,
+  }) async {
+    if (!_isAndroid) {
+      return ProcessResult(0, 1, '', 'not_android');
+    }
+    final su = await _resolveSuBin();
+    if (su == null) {
+      return ProcessResult(0, 127, '', 'su_unavailable');
+    }
+    final args = <String>['-c', '$_pathPrefix$command'];
+    final starter = _processStarter;
+    if (starter == null && !identical(_processRunner, Process.run)) {
+      try {
+        return await _processRunner(su, args).timeout(timeout);
+      } on TimeoutException {
+        return ProcessResult(0, 124, '', 'command_timeout');
+      } catch (e) {
+        return ProcessResult(0, 1, '', e.toString());
+      }
+    }
+
+    Process? process;
+    try {
+      process = await (starter ?? Process.start)(su, args);
+    } catch (e) {
+      return ProcessResult(0, 1, '', e.toString());
+    }
+
+    final res = await _executeProcessBounded(
+      process,
+      timeout: timeout,
+      maxOutputBytes: maxOutputBytes,
+    );
+    final capturedOut = res.truncated && res.stdout.isNotEmpty
+        ? '${res.stdout}\n[...truncated...]'
+        : res.stdout;
+
+    if (res.timedOut) {
+      final errTag = res.exitConfirmed
+          ? 'command_timeout'
+          : 'command_timeout;unconfirmed_exit';
+      return ProcessResult(res.pid, 124, capturedOut, errTag);
+    }
+    return ProcessResult(res.pid, res.exitCode, capturedOut, res.stderr);
+  }
+
+  /// 读取独立详细调试日志开关（严格逐行键值解析，未设置或解析/时间异常按关闭返回）
+  Future<DebugLogConfig> readDebugLogConfig() async {
+    if (!_isAndroid) {
+      return const DebugLogConfig(enabled: false, expireEpochSeconds: 0, readable: false);
+    }
+    try {
+      final result = await runSuTimed(
+        'if [ -f $diagConfigPath ]; then cat $diagConfigPath 2>/dev/null; else echo "__MISSING__"; fi',
+        timeout: const Duration(seconds: 3),
+      );
+      if (result.exitCode != 0) {
+        return const DebugLogConfig(enabled: false, expireEpochSeconds: 0, readable: false);
+      }
+      final raw = result.stdout.toString();
+      if (raw.trim() == '__MISSING__' || raw.trim().isEmpty) {
+        return const DebugLogConfig(enabled: false, expireEpochSeconds: 0, readable: true);
+      }
+      var enabled = false;
+      var expireEpoch = 0;
+      var invalid = false;
+      for (final rawLine in raw.split('\n')) {
+        final line = rawLine.trim();
+        if (line.isEmpty || line.startsWith('#')) continue;
+        final eq = line.indexOf('=');
+        if (eq <= 0) continue;
+        final key = line.substring(0, eq).trim();
+        final val = line.substring(eq + 1).trim();
+        if (key == 'debug_enabled') {
+          if (val == '1') {
+            enabled = true;
+          } else if (val == '0') {
+            enabled = false;
+          } else {
+            invalid = true;
+          }
+        } else if (key == 'debug_expire_epoch') {
+          if (!RegExp(r'^[0-9]+$').hasMatch(val)) {
+            invalid = true;
+          } else {
+            expireEpoch = int.tryParse(val) ?? 0;
+          }
+        }
+      }
+      if (invalid) {
+        return const DebugLogConfig(enabled: false, expireEpochSeconds: 0, readable: true);
+      }
+      final cfg = DebugLogConfig(
+        enabled: enabled,
+        expireEpochSeconds: expireEpoch,
+        readable: true,
+      );
+      if (!cfg.isActive) {
+        return DebugLogConfig(
+          enabled: false,
+          expireEpochSeconds: expireEpoch,
+          readable: true,
+        );
+      }
+      return cfg;
+    } catch (_) {
+      return const DebugLogConfig(enabled: false, expireEpochSeconds: 0, readable: false);
+    }
+  }
+
+  /// 保存详细调试日志开关（原子写 diag.conf，不重启核心、不重挂防火墙）
+  Future<DebugLogConfig?> setDebugLogConfig({
+    required bool enabled,
+    int durationMinutes = DebugLogConfig.defaultDurationMinutes,
+  }) async {
+    if (!_isAndroid) return null;
+    final safeMinutes = durationMinutes.clamp(1, 1440);
+    final expireEpoch = enabled
+        ? (DateTime.now().millisecondsSinceEpoch ~/ 1000) + safeMinutes * 60
+        : 0;
+    final enVal = enabled ? 1 : 0;
+    try {
+      final result = await runSuTimed(
+        'if [ -f $diagLogHelperPath ]; then '
+        '  . $diagLogHelperPath && agh_diag_write_conf $enVal $expireEpoch; '
+        'else '
+        '  mkdir -p /data/adb/agh 2>/dev/null && '
+        '  t="$diagConfigPath.tmp.\$\$" && '
+        '  printf "debug_enabled=%s\\ndebug_expire_epoch=%s\\n" "$enVal" "$expireEpoch" > "\$t" && '
+        '  chmod 0600 "\$t" 2>/dev/null && mv -f "\$t" $diagConfigPath && chmod 0600 $diagConfigPath 2>/dev/null; '
+        'fi',
+        timeout: const Duration(seconds: 3),
+      );
+      recordOperation(ModuleOperationRecord(
+        timestamp: DateTime.now(),
+        type: 'debug_log_toggle',
+        opId: 'dbg_${DateTime.now().millisecondsSinceEpoch}',
+        target: enabled ? '${safeMinutes}m' : 'off',
+        stage: result.exitCode == 0 ? 'saved' : 'failed',
+        exitCode: result.exitCode,
+        succeeded: result.exitCode == 0,
+      ));
+      if (result.exitCode != 0) return null;
+      return DebugLogConfig(
+        enabled: enabled,
+        expireEpochSeconds: expireEpoch,
+        readable: true,
+      );
+    } catch (_) {
+      return null;
     }
   }
 
@@ -785,9 +1153,16 @@ echo "ALLOW=\$allow_cnt"
         _modeSwitchQueue.last.targetMode == normalized) {
       entry = _modeSwitchQueue.last;
     } else {
+      final opId = 'mgr_${DateTime.now().millisecondsSinceEpoch}';
+      final enqueuedAt = Stopwatch()..start();
       entry = _ModeSwitchQueueEntry(
         targetMode: normalized,
-        executor: () => _performSwitchRunMode(normalized),
+        enqueuedAt: enqueuedAt,
+        executor: (queueWaitMs) => _performSwitchRunMode(
+          normalized,
+          opId: opId,
+          queueWaitMs: queueWaitMs,
+        ),
       );
       _modeSwitchQueue.add(entry);
       if (!_drainingModeSwitchQueue) {
@@ -818,7 +1193,9 @@ echo "ALLOW=\$allow_cnt"
       while (_modeSwitchQueue.isNotEmpty) {
         final current = _modeSwitchQueue.first;
         current.started = true;
-        final result = await current.executor();
+        current.enqueuedAt.stop();
+        final queueWaitMs = current.enqueuedAt.elapsedMilliseconds;
+        final result = await current.executor(queueWaitMs);
         if (_modeSwitchQueue.isNotEmpty &&
             identical(_modeSwitchQueue.first, current)) {
           _modeSwitchQueue.removeAt(0);
@@ -839,27 +1216,107 @@ echo "ALLOW=\$allow_cnt"
     return res.succeeded;
   }
 
-  Future<ModeSwitchResult> _performSwitchRunMode(String normalized) async {
+  Future<ModeSwitchResult> _performSwitchRunMode(
+    String normalized, {
+    String? opId,
+    int? queueWaitMs,
+  }) async {
+    final scriptWaitSw = Stopwatch()..start();
     try {
+      final envParts = <String>[];
+      if (opId != null &&
+          opId.isNotEmpty &&
+          RegExp(r'^[A-Za-z0-9_.-]+$').hasMatch(opId)) {
+        envParts.add('AGH_SWITCH_OP_ID=$opId');
+      }
+      if (queueWaitMs != null && queueWaitMs >= 0) {
+        envParts.add('AGH_QUEUE_WAIT_MS=$queueWaitMs');
+      }
+      final envPrefix = envParts.isEmpty ? '' : '${envParts.join(' ')} ';
       final result = await _runSu(
         'rm -f /dev/shm/agh_manual_stop /data/adb/agh/run/agh_manual_stop /data/adb/agh/manual_stop /data/adb/agh/stopped /data/adb/agh/app_pause_active 2>/dev/null; '
-        '/system/bin/sh /data/adb/agh/scripts/switch_mode.sh $normalized 2>&1',
+        '$envPrefix/system/bin/sh /data/adb/agh/scripts/switch_mode.sh $normalized 2>&1',
       );
+      scriptWaitSw.stop();
       _cachedDiag = null;
       _cachedDiagTime = null;
-      return ModeSwitchResult.fromScriptOutput(
+      final res = ModeSwitchResult.fromScriptOutput(
         exitCode: result.exitCode,
         stdoutText: result.stdout.toString(),
         targetMode: normalized,
+        fallbackOpId: opId,
+        managerQueueWaitMs: queueWaitMs,
+        managerScriptWaitMs: scriptWaitSw.elapsedMilliseconds,
       );
+      recordOperation(ModuleOperationRecord(
+        timestamp: DateTime.now(),
+        type: 'mode_switch',
+        opId: res.opId ?? opId ?? 'unknown',
+        target: normalized,
+        stage: res.stage,
+        exitCode: result.exitCode,
+        succeeded: res.succeeded,
+        elapsedMs: res.managerScriptWaitMs,
+      ));
+      return res;
     } catch (_) {
+      scriptWaitSw.stop();
+      recordOperation(ModuleOperationRecord(
+        timestamp: DateTime.now(),
+        type: 'mode_switch',
+        opId: opId ?? 'unknown',
+        target: normalized,
+        stage: 'exception',
+        exitCode: -1,
+        succeeded: false,
+        elapsedMs: scriptWaitSw.elapsedMilliseconds,
+      ));
       return ModeSwitchResult(
         succeeded: false,
         stage: 'exception',
         mode: normalized,
         targetMode: normalized,
         message: '模式切换异常',
+        opId: opId,
+        managerQueueWaitMs: queueWaitMs,
+        managerScriptWaitMs: scriptWaitSw.elapsedMilliseconds,
       );
+    }
+  }
+
+  /// 按需向模块日志追加管理器侧 Stopwatch 耗时（正常仅在开启详细调试日志时记录；失败/异常仍记录）
+  Future<void> recordManagerModeSwitchTimings({
+    required String opId,
+    int? managerScriptWaitMs,
+    int? managerRefreshMs,
+    String status = 'ok',
+  }) async {
+    if (!_isAndroid || opId.isEmpty) return;
+    if (!RegExp(r'^[A-Za-z0-9_.-]+$').hasMatch(opId) ||
+        !RegExp(r'^[A-Za-z0-9_.-]+$').hasMatch(status)) {
+      return;
+    }
+    final lines = <String>[];
+    if (managerScriptWaitMs != null) {
+      final safeWait = managerScriptWaitMs < 0 ? 0 : managerScriptWaitMs;
+      lines.add(
+        'echo "\$(date \'+%F %T\') [TIMING] op_id=$opId stage=manager_script_wait status=$status elapsed_ms=$safeWait"',
+      );
+    }
+    if (managerRefreshMs != null) {
+      final safeRef = managerRefreshMs < 0 ? 0 : managerRefreshMs;
+      lines.add(
+        'echo "\$(date \'+%F %T\') [TIMING] op_id=$opId stage=manager_refresh status=$status elapsed_ms=$safeRef"',
+      );
+    }
+    if (lines.isEmpty) return;
+    final gateExpr = status != 'ok'
+        ? ''
+        : 'if [ ! -f $diagLogHelperPath ]; then exit 0; fi; . $diagLogHelperPath; agh_diag_debug_active || exit 0; ';
+    try {
+      await _runSu('$gateExpr{ ${lines.join('; ')}; } >> /data/adb/agh/agh.log 2>/dev/null');
+    } catch (_) {
+      // ignore telemetry write failures
     }
   }
 
@@ -879,7 +1336,9 @@ echo "ALLOW=\$allow_cnt"
   Future<bool> clearModuleLogs() async {
     if (!_isAndroid) return false;
     try {
-      final result = await _runSu(': > /data/adb/agh/agh.log 2>/dev/null');
+      final result = await _runSu(
+        ': > /data/adb/agh/agh.log 2>/dev/null; rm -f /data/adb/agh/agh.log.1 2>/dev/null',
+      );
       return result.exitCode == 0;
     } catch (_) {
       return false;
@@ -944,11 +1403,30 @@ echo "ALLOW=\$allow_cnt"
       );
       _cachedDiag = null;
       _cachedDiagTime = null;
-      return FirewallReloadResult.fromScriptOutput(
+      final res = FirewallReloadResult.fromScriptOutput(
         exitCode: result.exitCode,
         stdoutText: result.stdout.toString(),
       );
+      recordOperation(ModuleOperationRecord(
+        timestamp: DateTime.now(),
+        type: 'firewall_reload',
+        opId: 'repair_${DateTime.now().millisecondsSinceEpoch}',
+        target: res.branch,
+        stage: res.stage,
+        exitCode: result.exitCode,
+        succeeded: res.succeeded,
+      ));
+      return res;
     } catch (_) {
+      recordOperation(ModuleOperationRecord(
+        timestamp: DateTime.now(),
+        type: 'firewall_reload',
+        opId: 'repair_${DateTime.now().millisecondsSinceEpoch}',
+        target: 'exception',
+        stage: 'exception',
+        exitCode: -1,
+        succeeded: false,
+      ));
       return const FirewallReloadResult(
         succeeded: false,
         branch: 'exception',
@@ -1420,11 +1898,30 @@ chmod 644 /data/adb/agh/app-allow.txt
       final result = await _runSu(cmd);
       _cachedDiag = null;
       _cachedDiagTime = null;
-      return FirewallReloadResult.fromScriptOutput(
+      final res = FirewallReloadResult.fromScriptOutput(
         exitCode: result.exitCode,
         stdoutText: result.stdout.toString(),
       );
+      recordOperation(ModuleOperationRecord(
+        timestamp: DateTime.now(),
+        type: 'firewall_reload',
+        opId: 'repair_${DateTime.now().millisecondsSinceEpoch}',
+        target: res.branch,
+        stage: res.stage,
+        exitCode: result.exitCode,
+        succeeded: res.succeeded,
+      ));
+      return res;
     } catch (_) {
+      recordOperation(ModuleOperationRecord(
+        timestamp: DateTime.now(),
+        type: 'firewall_reload',
+        opId: 'repair_${DateTime.now().millisecondsSinceEpoch}',
+        target: 'exception',
+        stage: 'exception',
+        exitCode: -1,
+        succeeded: false,
+      ));
       return const FirewallReloadResult(
         succeeded: false,
         branch: 'exception',

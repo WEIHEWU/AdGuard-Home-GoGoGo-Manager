@@ -1,7 +1,10 @@
 package com.wu.adgogogo
 
 import android.app.LocaleManager
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.ComponentName
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -12,15 +15,18 @@ import android.os.LocaleList
 import android.service.quicksettings.TileService
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
+import java.io.File
 
 class MainActivity: FlutterActivity() {
     private val channelName = "com.wu.adgogogo/locale"
     private val localNetworkChannelName = "com.wu.adgogogo/local_network"
     private val installedAppsChannelName = "com.wu.adgogogo/installed_apps"
+    private val diagnosticsChannelName = "com.wu.adgogogo/diagnostics"
 
     // String literal on purpose: the constant only exists in API 37 SDK and
     // the project compiles with 36.
@@ -102,6 +108,57 @@ class MainActivity: FlutterActivity() {
                             }
                         }
                     }.start()
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            diagnosticsChannelName
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getCacheDiagDir" -> {
+                    val dir = File(cacheDir, "diag_bundles")
+                    if (!dir.exists()) {
+                        dir.mkdirs()
+                    }
+                    result.success(dir.absolutePath)
+                }
+                "shareDiagBundle" -> {
+                    val filePath = call.argument<String>("filePath")
+                    val title = call.argument<String>("title") ?: "Share Diagnostic Bundle"
+                    if (filePath.isNullOrBlank()) {
+                        result.error("INVALID_ARG", "Missing filePath", null)
+                        return@setMethodCallHandler
+                    }
+                    val cacheDiagDir = File(cacheDir, "diag_bundles").canonicalFile
+                    val targetFile = File(filePath).canonicalFile
+                    if (!targetFile.exists() || !targetFile.isFile ||
+                        !targetFile.path.startsWith(cacheDiagDir.path + File.separator)
+                    ) {
+                        result.error("INVALID_PATH", "Bundle file not found in cache diag dir", null)
+                        return@setMethodCallHandler
+                    }
+                    try {
+                        val authority = "${applicationContext.packageName}.fileprovider"
+                        val contentUri = FileProvider.getUriForFile(this, authority, targetFile)
+                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "application/zip"
+                            putExtra(Intent.EXTRA_STREAM, contentUri)
+                            clipData = ClipData.newRawUri("diagnostics", contentUri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        val chooser = Intent.createChooser(sendIntent, title).apply {
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(chooser)
+                        result.success(true)
+                    } catch (_: ActivityNotFoundException) {
+                        result.success(false)
+                    } catch (t: Throwable) {
+                        result.error("SHARE_FAILED", t.message, null)
+                    }
                 }
                 else -> result.notImplemented()
             }

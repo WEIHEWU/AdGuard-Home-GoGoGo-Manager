@@ -6,8 +6,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
-import 'package:adguard_home_manager/functions/get_filtered_status.dart';
+import 'package:adguard_home_manager/functions/format_time.dart';
 import 'package:adguard_home_manager/functions/snackbar.dart';
+import 'package:adguard_home_manager/models/filtering.dart';
+import 'package:adguard_home_manager/widgets/module_diagnostics_sheet.dart';
+import 'package:adguard_home_manager/widgets/troubleshooter_rule_panel.dart';
 import 'package:adguard_home_manager/models/logs.dart';
 import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/providers/dns_provider.dart';
@@ -15,6 +18,8 @@ import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
 import 'package:adguard_home_manager/screens/settings/module/app_allowlist_modal.dart';
+import 'package:adguard_home_manager/services/domain_input_parser.dart';
+import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
 
 /// 极简内嵌式模块快捷操作区（内嵌于首页顶部保护主卡片中）：
@@ -58,8 +63,16 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
   Future<void> _syncHttpAddressIfNeeded(
     ServersProvider serversProvider,
     AppConfigProvider appConfigProvider,
-    ModuleConfigService service,
-  ) async {
+    ModuleConfigService service, {
+    int? hintHttpPort,
+  }) async {
+    final currentAddr = appConfigProvider.moduleHttpAddress;
+    if (hintHttpPort != null &&
+        hintHttpPort > 0 &&
+        currentAddr.isNotEmpty &&
+        currentAddr.endsWith(':$hintHttpPort')) {
+      return;
+    }
     final addr = await service.readHttpAddress();
     if (addr != null &&
         addr.isNotEmpty &&
@@ -89,17 +102,31 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
     final service = ModuleConfigService();
 
     final switchRes = await service.switchRunModeDetailed(targetMode);
-    await _syncHttpAddressIfNeeded(serversProvider, appConfigProvider, service);
-    await Future.delayed(const Duration(milliseconds: 300));
+    final refreshSw = Stopwatch()..start();
     await Future.wait([
+      _syncHttpAddressIfNeeded(
+        serversProvider,
+        appConfigProvider,
+        service,
+        hintHttpPort: switchRes.httpPort,
+      ),
       _loadDiagnostics(forceRefresh: true),
       statusProvider.getServerStatus(withLoadingIndicator: false),
       dnsProvider.fetchDnsData(showLoading: false),
       filteringProvider.fetchFilters(showLoading: false),
     ]);
+    refreshSw.stop();
 
     if (!mounted) return;
     setState(() => _switchingMode = false);
+    if (switchRes.opId != null) {
+      unawaited(service.recordManagerModeSwitchTimings(
+        opId: switchRes.opId!,
+        managerScriptWaitMs: switchRes.managerScriptWaitMs,
+        managerRefreshMs: refreshSw.elapsedMilliseconds,
+        status: switchRes.succeeded ? 'ok' : 'error',
+      ));
+    }
     final modeLabel =
         targetMode == 'cn' ? '🇨🇳 国内模式 (CN)' : '🌐 海外模式 (Overseas)';
     if (switchRes.unconfirmed) {
@@ -107,6 +134,10 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
         appConfigProvider: appConfigProvider,
         label: '执行结果未确认，已同步当前实际状态',
         color: Colors.orange,
+        actionLabel: '导出诊断包',
+        onAction: () {
+          if (mounted) showDiagnosticExportFlow(context, isZhOverride: true);
+        },
       );
       return;
     }
@@ -116,6 +147,14 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
           ? '已成功切换至 $modeLabel'
           : '模式切换失败（${switchRes.stage}），已保持原状态',
       color: switchRes.succeeded ? Colors.green : Colors.red,
+      actionLabel: switchRes.succeeded ? null : '导出诊断包',
+      onAction: switchRes.succeeded
+          ? null
+          : () {
+              if (mounted) {
+                showDiagnosticExportFlow(context, isZhOverride: true);
+              }
+            },
     );
   }
 
@@ -478,6 +517,7 @@ class _BlockedDomainSummary {
   final String ruleText;
   final bool isSni;
   final bool isNewAfterCapture;
+  final AggregatedLogGroup? group;
 
   _BlockedDomainSummary({
     required this.domain,
@@ -486,21 +526,29 @@ class _BlockedDomainSummary {
     required this.ruleText,
     required this.isSni,
     this.isNewAfterCapture = false,
+    this.group,
   });
 }
 
 class _DiagnosedDomainItem {
   final String domain;
   final bool blocked;
+  final RuleCheckStatus status;
   final String reasonText;
   final String ruleText;
+  final List<MatchedRuleInfo> matchedRules;
 
   const _DiagnosedDomainItem({
     required this.domain,
     required this.blocked,
+    this.status = RuleCheckStatus.notBlocked,
     required this.reasonText,
     required this.ruleText,
+    this.matchedRules = const [],
   });
+
+  bool get isError =>
+      status == RuleCheckStatus.failed || status == RuleCheckStatus.unsupported;
 }
 
 class _FalsePositiveAssistantModal extends StatefulWidget {
@@ -520,10 +568,23 @@ class _FalsePositiveAssistantModalState
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
   List<_BlockedDomainSummary> _blockedDomains = [];
+  List<AggregatedLogGroup> _aggregatedHistory = [];
+  bool _usingLegacyLogFallback = false;
   bool _searchingRules = false;
   List<Map<String, String>> _ruleMatches = [];
   Timer? _searchDebounce;
   late final RuleSearchCoordinator _ruleSearchCoordinator;
+
+  // 实时规则检测 & 安全加白状态
+  int _liveCheckGen = 0;
+  bool _checkingLiveHost = false;
+  String? _liveParseError;
+  HostFamilyCheckReport? _liveCheckReport;
+  String? _activeServerId;
+  final ExceptionRuleCoordinator _exceptionCoordinator =
+      ExceptionRuleCoordinator();
+  final Map<String, ExceptionWriteOutcome> _exceptionOutcomes = {};
+  bool _writingException = false;
 
   // Tab 1 (网页排错) 状态
   final TextEditingController _urlController = TextEditingController();
@@ -579,7 +640,38 @@ class _FalsePositiveAssistantModalState
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final currentServerId =
+        Provider.of<ServersProvider>(context).selectedServer?.id;
+    if (_activeServerId != null && currentServerId != _activeServerId) {
+      // 切换服务器时立即作废在途实时检测与旧列表结果，并刷新新服务器数据
+      _liveCheckGen++;
+      _activeServerId = currentServerId;
+      _liveCheckReport = null;
+      _liveParseError = null;
+      _checkingLiveHost = false;
+      _exceptionOutcomes.clear();
+      _blockedDomains = [];
+      _aggregatedHistory = [];
+      _usingLegacyLogFallback = false;
+      if (_searchQuery.isNotEmpty) {
+        final q = _searchController.text;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _triggerLiveCheckForInput(q);
+        });
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _fetchRecentBlocked();
+      });
+    } else {
+      _activeServerId ??= currentServerId;
+    }
+  }
+
+  @override
   void dispose() {
+    _liveCheckGen++;
     WidgetsBinding.instance.removeObserver(this);
     _searchDebounce?.cancel();
     _ruleSearchCoordinator.dispose();
@@ -598,25 +690,125 @@ class _FalsePositiveAssistantModalState
     }
   }
 
+  (Map<int, String>, Map<int, String>) _resolveFilterNameMaps(
+      Filtering? filtering) {
+    if (filtering == null) return (const {}, const {});
+    return (
+      RuleBatchChecker.buildFilterNameMap(filtering.filters),
+      RuleBatchChecker.buildFilterNameMap(filtering.whitelistFilters),
+    );
+  }
+
   void _onSearchChanged() {
-    final q = _searchController.text.trim().toLowerCase();
+    final raw = _searchController.text;
+    final q = raw.trim().toLowerCase();
     if (q == _searchQuery) return;
     _searchDebounce?.cancel();
+    _liveCheckGen++;
+
     if (q.length < 2) {
       _ruleSearchCoordinator.invalidatePending();
       setState(() {
         _searchQuery = q;
         _ruleMatches = [];
         _searchingRules = false;
+        _checkingLiveHost = false;
+        _liveParseError = null;
+        _liveCheckReport = null;
       });
       return;
     }
+
     setState(() {
       _searchQuery = q;
       _searchingRules = true;
+      _checkingLiveHost = true;
+      _liveParseError = null;
+      _liveCheckReport = null;
     });
+    final gen = _liveCheckGen;
     _searchDebounce = Timer(const Duration(milliseconds: 300), () {
-      _ruleSearchCoordinator.submitSearch(q);
+      if (!mounted || gen != _liveCheckGen) return;
+      _triggerLiveCheckForInput(raw, forcedGen: gen);
+    });
+  }
+
+  Future<void> _triggerLiveCheckForInput(String rawInput, {int? forcedGen}) async {
+    final gen = forcedGen ?? ++_liveCheckGen;
+    final parsed = DomainInputParser.parseSingleInput(rawInput);
+
+    if (!parsed.ok) {
+      // 若包含明显 URL/空白歧义/非法链接字符则直接给出解析错误；纯短关键词仍允许历史与规则文本搜索
+      final looksLikeUrlOrAmbiguous = rawInput.contains('://') ||
+          rawInput.contains('/') ||
+          rawInput.contains(':') ||
+          RegExp(r'\s').hasMatch(rawInput.trim()) ||
+          rawInput.contains('.');
+      _ruleSearchCoordinator.submitSearch(rawInput.trim().toLowerCase());
+      if (!mounted || gen != _liveCheckGen) return;
+      setState(() {
+        _checkingLiveHost = false;
+        _liveCheckReport = null;
+        _liveParseError =
+            looksLikeUrlOrAmbiguous ? (parsed.errorReason ?? '输入格式无效') : null;
+      });
+      return;
+    }
+
+    // 用规范化后的 host 触发本地规则辅助搜索（绝不把含追踪 token 的完整 URL 送去写日志或网络）
+    _ruleSearchCoordinator.submitSearch(parsed.normalizedHost);
+
+    final serversProvider =
+        Provider.of<ServersProvider>(context, listen: false);
+    final api = serversProvider.apiClient2;
+    if (api == null) {
+      if (!mounted || gen != _liveCheckGen) return;
+      setState(() {
+        _checkingLiveHost = false;
+        _liveParseError = null;
+        _liveCheckReport = HostFamilyCheckReport(
+          parsedInput: parsed,
+          originalA: HostCheckResult(
+            host: parsed.normalizedHost,
+            isOriginal: true,
+            status: RuleCheckStatus.failed,
+            rawReason: '',
+            rules: const [],
+            errorDetail: '未连接服务器',
+          ),
+          parentResults: const [],
+        );
+      });
+      return;
+    }
+
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
+    var filtering = filteringProvider.filtering;
+    if (filtering == null) {
+      await filteringProvider.fetchFilters(showLoading: false);
+      if (!mounted || gen != _liveCheckGen) return;
+      filtering = filteringProvider.filtering;
+    }
+    final (filterNames, whitelistNames) = _resolveFilterNameMaps(filtering);
+
+    final serverSnapshot = _activeServerId;
+    final report = await RuleBatchChecker.checkDomainFamily(
+      parsed: parsed,
+      filterNames: filterNames,
+      whitelistNames: whitelistNames,
+      isCancelled: () =>
+          !mounted || gen != _liveCheckGen || _activeServerId != serverSnapshot,
+      checker: (host, qtype) => api.checkHostFiltered(host: host, qtype: qtype),
+    );
+
+    if (!mounted || gen != _liveCheckGen || _activeServerId != serverSnapshot) {
+      return;
+    }
+    setState(() {
+      _checkingLiveHost = false;
+      _liveParseError = null;
+      _liveCheckReport = report;
     });
   }
 
@@ -624,49 +816,61 @@ class _FalsePositiveAssistantModalState
     setState(() => _loading = true);
     final serversProvider =
         Provider.of<ServersProvider>(context, listen: false);
-    if (serversProvider.apiClient2 == null) {
+    final api = serversProvider.apiClient2;
+    if (api == null) {
       if (mounted) setState(() => _loading = false);
       return;
     }
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
+    if (filteringProvider.filtering == null) {
+      await filteringProvider.fetchFilters(showLoading: false);
+    }
+    if (!mounted) return;
+    final (filterNames, whitelistNames) =
+        _resolveFilterNameMaps(filteringProvider.filtering);
 
-    final result = await serversProvider.apiClient2!.getLogs(
+    final summaryResp = await api.getBlockedSummary(limit: 256);
+    if (!mounted) return;
+
+    if (summaryResp.successful == true &&
+        summaryResp.content is Map<String, dynamic>) {
+      final parsedSummary = BlockedSummaryData.fromJson(
+          summaryResp.content as Map<String, dynamic>);
+      final groups = BlockedEventAggregator.fromBlockedSummary(
+        parsedSummary,
+        filterNames: filterNames,
+        whitelistNames: whitelistNames,
+      );
+      final domains = _buildLegacyDomainListFromGroups(groups);
+      setState(() {
+        _usingLegacyLogFallback = false;
+        _aggregatedHistory = groups;
+        _blockedDomains = domains;
+        _loading = false;
+      });
+      return;
+    }
+
+    // 兼容回退：旧版核心不支持 /control/querylog/blocked_summary 时回退到 /querylog?response_status=blocked
+    final fallbackResp = await api.getLogs(
       count: 200,
       responseStatus: 'blocked',
     );
-
     if (!mounted) return;
-    if (result.successful == true && result.content is LogsData) {
-      final logs = (result.content as LogsData).data;
-      final Map<String, _BlockedDomainSummary> map = {};
-      for (final log in logs) {
-        final domain = log.question.name?.trim() ?? '';
-        if (domain.isEmpty) continue;
-        final isSni =
-            (log.clientProto?.toLowerCase().contains('sni') ?? false) ||
-                log.question.type.toUpperCase() == 'SNI';
-        final ruleText = log.rules.isNotEmpty
-            ? log.rules.first.text
-            : (log.rule?.isNotEmpty == true ? log.rule! : log.reason);
-
-        if (map.containsKey(domain)) {
-          map[domain]!.count += 1;
-          if (log.time.isAfter(map[domain]!.latestTime)) {
-            map[domain]!.latestTime = log.time;
-          }
-        } else {
-          map[domain] = _BlockedDomainSummary(
-            domain: domain,
-            count: 1,
-            latestTime: log.time,
-            ruleText: ruleText,
-            isSni: isSni,
-          );
-        }
-      }
-      final list = map.values.toList()
-        ..sort((a, b) => b.latestTime.compareTo(a.latestTime));
+    if (fallbackResp.successful == true && fallbackResp.content is LogsData) {
+      final logs = (fallbackResp.content as LogsData).data;
+      final groups = BlockedEventAggregator.aggregateRawLogs(
+        logs,
+        filterNames: filterNames,
+        whitelistNames: whitelistNames,
+      );
+      final domains = _buildLegacyDomainListFromGroups(groups);
       setState(() {
-        _blockedDomains = list;
+        _usingLegacyLogFallback =
+            summaryResp.statusCode == 404 || summaryResp.statusCode == 501 || !summaryResp.successful;
+        _aggregatedHistory = groups;
+        _blockedDomains = domains;
         _loading = false;
       });
     } else {
@@ -674,50 +878,78 @@ class _FalsePositiveAssistantModalState
     }
   }
 
+  List<_BlockedDomainSummary> _buildLegacyDomainListFromGroups(
+      List<AggregatedLogGroup> groups) {
+    final map = <String, _BlockedDomainSummary>{};
+    for (final g in groups) {
+      final existing = map[g.domain];
+      if (existing != null) {
+        existing.count += g.count;
+        if (g.time.isAfter(existing.latestTime)) {
+          existing.latestTime = g.time;
+        }
+      } else {
+        map[g.domain] = _BlockedDomainSummary(
+          domain: g.domain,
+          count: g.count,
+          latestTime: g.time,
+          ruleText: g.primaryRuleText,
+          isSni: g.isSni,
+          group: g,
+        );
+      }
+    }
+    return map.values.toList()
+      ..sort((a, b) => b.latestTime.compareTo(a.latestTime));
+  }
+
   Future<_DiagnosedDomainItem> _checkSingleDomain(String domain) async {
     final serversProvider =
         Provider.of<ServersProvider>(context, listen: false);
-    if (serversProvider.apiClient2 == null) {
+    final api = serversProvider.apiClient2;
+    if (api == null) {
       return _DiagnosedDomainItem(
         domain: domain,
         blocked: false,
-        reasonText: '未连接',
+        status: RuleCheckStatus.failed,
+        reasonText: '未连接服务器',
         ruleText: '',
       );
     }
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
+    final (filterNames, whitelistNames) =
+        _resolveFilterNameMaps(filteringProvider.filtering);
     try {
-      final res =
-          await serversProvider.apiClient2!.checkHostFiltered(host: domain);
-      if (res.successful && res.content is Map) {
-        final map = res.content as Map;
-        final reason = (map['reason'] ?? '').toString();
-        final blocked = isDomainBlocked(reason);
-        String ruleText = '';
-        if (map['rules'] is List && (map['rules'] as List).isNotEmpty) {
-          final firstRule = (map['rules'] as List).first;
-          if (firstRule is Map) {
-            ruleText = (firstRule['text'] ?? '').toString();
-          }
-        }
-        if (ruleText.isEmpty && map['rule'] != null) {
-          ruleText = map['rule'].toString();
-        }
-        return _DiagnosedDomainItem(
-          domain: domain,
-          blocked: blocked,
-          reasonText: blocked
-              ? '被规则拦截'
-              : (reason == 'NotFilteredWhiteList' ? '白名单已放行' : '正常放行'),
-          ruleText: ruleText,
-        );
-      }
-    } catch (_) {}
-    return _DiagnosedDomainItem(
-      domain: domain,
-      blocked: false,
-      reasonText: '正常放行',
-      ruleText: '',
-    );
+      final res = await api
+          .checkHostFiltered(host: domain, qtype: 'A')
+          .timeout(const Duration(seconds: 5));
+      final parsed = HostCheckResult.fromApiResponse(
+        host: domain,
+        response: res,
+        isOriginal: true,
+        filterNames: filterNames,
+        whitelistNames: whitelistNames,
+      );
+      return _DiagnosedDomainItem(
+        domain: domain,
+        blocked: parsed.isBlocked,
+        status: parsed.status,
+        reasonText: parsed.statusLabel,
+        ruleText: parsed.rules.isNotEmpty
+            ? '${parsed.rules.first.sourceName} · ${parsed.rules.first.text}'
+            : '',
+        matchedRules: parsed.rules,
+      );
+    } catch (e) {
+      return _DiagnosedDomainItem(
+        domain: domain,
+        blocked: false,
+        status: RuleCheckStatus.failed,
+        reasonText: '查询失败（超时或异常）',
+        ruleText: '',
+      );
+    }
   }
 
   Future<void> _diagnoseWebpage() async {
@@ -927,87 +1159,292 @@ class _FalsePositiveAssistantModalState
     return '${time.month}/${time.day} ${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
   }
 
-  Future<void> _unblockDomain(String domain) async {
+  Future<bool> _confirmRuleDialog({
+    required String title,
+    required String body,
+    required String rule,
+  }) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title, style: const TextStyle(fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(body, style: const TextStyle(fontSize: 13)),
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                rule,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确认写入'),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<void> _applyExceptionRule(
+    String rule, {
+    required bool confirmBroad,
+    String? verifyHostOverride,
+  }) async {
+    if (_writingException) return;
+    final verifyHost = verifyHostOverride ??
+        _liveCheckReport?.parsedInput.normalizedHost ??
+        '';
+    if (verifyHost.isEmpty) return;
+
+    if (confirmBroad) {
+      final isImp = rule.endsWith(r'$important');
+      final confirmed = await _confirmRuleDialog(
+        title: isImp ? '确认添加优先级例外' : '确认宽范围放行',
+        body: isImp
+            ? '当前命中规则带 \$important 优先级。仅在明确知晓优先级影响时，才应添加如下 \$important 例外规则：'
+            : '该例外规则会影响所属域名及全部下级子域名（例如可能同时放行同一追踪域名下的其他链接），是否确认写入？',
+        rule: rule,
+      );
+      if (!confirmed || !mounted) return;
+    }
+
+    HapticFeedback.mediumImpact();
+    setState(() => _writingException = true);
+
+    final serversProvider =
+        Provider.of<ServersProvider>(context, listen: false);
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
+    final appConfigProvider =
+        Provider.of<AppConfigProvider>(context, listen: false);
+    final api = serversProvider.apiClient2;
+    if (api == null) {
+      if (mounted) setState(() => _writingException = false);
+      return;
+    }
+    final (filterNames, whitelistNames) =
+        _resolveFilterNameMaps(filteringProvider.filtering);
+
+    final outcome = await _exceptionCoordinator.applyExceptionAndVerify(
+      apiClient: api,
+      verifyHost: verifyHost,
+      exceptionRule: rule,
+      flushSystemDnsCache: () => ModuleConfigService().flushSystemDnsCache(),
+      filterNames: filterNames,
+      whitelistNames: whitelistNames,
+    );
+    await filteringProvider.fetchFilters(showLoading: false);
+
+    if (!mounted) return;
+    setState(() {
+      _writingException = false;
+      _exceptionOutcomes[rule] = outcome;
+      if (outcome.verifiedUnblocked) {
+        _unblockedDomains.add(verifyHost);
+      }
+    });
+
+    if (_liveCheckReport != null &&
+        _liveCheckReport!.parsedInput.normalizedHost == verifyHost) {
+      await _triggerLiveCheckForInput(verifyHost);
+    }
+
+    if (!mounted) return;
+    showSnackbar(
+      appConfigProvider: appConfigProvider,
+      label: outcome.message,
+      color: outcome.verifiedUnblocked
+          ? Colors.green
+          : (outcome.writeSucceeded ? Colors.orange : Colors.red),
+    );
+  }
+
+  Future<void> _undoExceptionRule(String addedRule) async {
+    if (_writingException) return;
+    final serversProvider =
+        Provider.of<ServersProvider>(context, listen: false);
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
+    final appConfigProvider =
+        Provider.of<AppConfigProvider>(context, listen: false);
+    final api = serversProvider.apiClient2;
+    if (api == null) return;
+
+    setState(() => _writingException = true);
+    final res = await _exceptionCoordinator.undoAddedException(
+      apiClient: api,
+      addedRule: addedRule,
+      flushSystemDnsCache: () => ModuleConfigService().flushSystemDnsCache(),
+    );
+    await filteringProvider.fetchFilters(showLoading: false);
+
+    if (!mounted) return;
+    setState(() {
+      _writingException = false;
+      if (res.ok) {
+        _exceptionOutcomes.remove(addedRule);
+        if (_liveCheckReport != null) {
+          _unblockedDomains.remove(_liveCheckReport!.parsedInput.normalizedHost);
+        }
+      }
+    });
+    if (_liveCheckReport != null) {
+      await _triggerLiveCheckForInput(_liveCheckReport!.parsedInput.normalizedHost);
+    }
+
+    if (!mounted) return;
+    showSnackbar(
+      appConfigProvider: appConfigProvider,
+      label: res.message,
+      color: res.ok ? Colors.green : Colors.red,
+    );
+  }
+
+  Future<void> _unblockDomain(
+    String domain, {
+    List<MatchedRuleInfo> matchedRules = const [],
+  }) async {
     if (_unblockingInProgress.contains(domain) ||
         _unblockedDomains.contains(domain)) {
       return;
     }
-    HapticFeedback.mediumImpact();
-    setState(() => _unblockingInProgress.add(domain));
-
-    final statusProvider = Provider.of<StatusProvider>(context, listen: false);
-    final serversProvider =
-        Provider.of<ServersProvider>(context, listen: false);
-    final appConfigProvider =
-        Provider.of<AppConfigProvider>(context, listen: false);
-
-    final ok = await statusProvider.blockUnblockDomain(
-      domain: domain,
-      newStatus: 'unblock',
+    final suggestion = WhitelistPlanner.buildSuggestion(
+      originalHost: domain,
+      matchedRules: matchedRules,
     );
-
-    if (ok) {
-      await Future.wait([
-        if (serversProvider.apiClient2 != null)
-          serversProvider.apiClient2!.resetDnsCache(),
-        ModuleConfigService().flushSystemDnsCache(),
-      ]);
-    }
-
     if (!mounted) return;
-    setState(() {
-      _unblockingInProgress.remove(domain);
-      if (ok) {
-        _unblockedDomains.add(domain);
-      }
-    });
 
-    showSnackbar(
-      appConfigProvider: appConfigProvider,
-      label: ok ? '已放行 $domain 并刷新缓存' : '放行失败，请重试',
-      color: ok ? Colors.green : Colors.red,
+    final selectedRule = await showDialog<({String rule, bool broad})>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('选择放行范围 · $domain', style: const TextStyle(fontSize: 15.5)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (suggestion.narrowRule != null) ...[
+              Text('按钮 A · 放行此子域名: ${suggestion.narrowRule}',
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5)),
+              const SizedBox(height: 2),
+              Text(suggestion.narrowDescription,
+                  style: const TextStyle(fontSize: 11.5)),
+              const SizedBox(height: 10),
+            ],
+            if (suggestion.broadRule != null) ...[
+              Text('按钮 B · 放行命中规则域名: ${suggestion.broadRule}',
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5)),
+              const SizedBox(height: 2),
+              Text(suggestion.broadDescription ?? '',
+                  style: TextStyle(fontSize: 11.5, color: Colors.orange.shade900)),
+            ] else if (suggestion.broadDisabledReason != null) ...[
+              Text('宽范围放行已禁用: ${suggestion.broadDisabledReason}',
+                  style: const TextStyle(fontSize: 11.5, color: Colors.grey)),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          if (suggestion.narrowRule != null)
+            FilledButton.tonal(
+              onPressed: () =>
+                  Navigator.pop(ctx, (rule: suggestion.narrowRule!, broad: false)),
+              child: const Text('放行此子域名'),
+            ),
+          if (suggestion.broadRule != null)
+            OutlinedButton(
+              onPressed: () =>
+                  Navigator.pop(ctx, (rule: suggestion.broadRule!, broad: true)),
+              child: const Text('放行规则域名'),
+            ),
+        ],
+      ),
     );
+    if (selectedRule == null || !mounted) return;
+
+    setState(() => _unblockingInProgress.add(domain));
+    await _applyExceptionRule(
+      selectedRule.rule,
+      confirmBroad: selectedRule.broad,
+      verifyHostOverride: domain,
+    );
+    if (!mounted) return;
+    setState(() => _unblockingInProgress.remove(domain));
   }
 
   Future<void> _unblockAllDomains(List<String> domains) async {
     final pending =
         domains.where((d) => !_unblockedDomains.contains(d)).toList();
     if (pending.isEmpty || _batchUnblocking) return;
+    final confirmed = await _confirmRuleDialog(
+      title: '确认批量写入子域名例外',
+      body: '将为以下 ${pending.length} 个被拦截域名分别写入 `@@||域名^` 例外（保留既有规则，不使用 \$important）并逐项核验：',
+      rule: pending.map((d) => '@@||$d^').join('\n'),
+    );
+    if (!confirmed || !mounted) return;
+
     HapticFeedback.mediumImpact();
     setState(() => _batchUnblocking = true);
 
-    final statusProvider = Provider.of<StatusProvider>(context, listen: false);
     final serversProvider =
         Provider.of<ServersProvider>(context, listen: false);
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
     final appConfigProvider =
         Provider.of<AppConfigProvider>(context, listen: false);
+    final api = serversProvider.apiClient2;
+    if (api == null) {
+      setState(() => _batchUnblocking = false);
+      return;
+    }
+    final (filterNames, whitelistNames) =
+        _resolveFilterNameMaps(filteringProvider.filtering);
 
-    int successCount = 0;
+    int verifiedCount = 0;
     for (final d in pending) {
-      final ok = await statusProvider.blockUnblockDomain(
-        domain: d,
-        newStatus: 'unblock',
+      final out = await _exceptionCoordinator.applyExceptionAndVerify(
+        apiClient: api,
+        verifyHost: d,
+        exceptionRule: '@@||$d^',
+        flushSystemDnsCache: () => ModuleConfigService().flushSystemDnsCache(),
+        filterNames: filterNames,
+        whitelistNames: whitelistNames,
       );
-      if (ok) {
-        successCount++;
+      if (out.verifiedUnblocked) {
+        verifiedCount++;
         if (mounted) {
           setState(() => _unblockedDomains.add(d));
         }
       }
     }
-
-    await Future.wait([
-      if (serversProvider.apiClient2 != null)
-        serversProvider.apiClient2!.resetDnsCache(),
-      ModuleConfigService().flushSystemDnsCache(),
-    ]);
+    await filteringProvider.fetchFilters(showLoading: false);
 
     if (!mounted) return;
     setState(() => _batchUnblocking = false);
     showSnackbar(
       appConfigProvider: appConfigProvider,
-      label: '已一键放行 $successCount 个关联域名并刷新 DNS 缓存',
-      color: Colors.green,
+      label: '已写入 $verifiedCount/${pending.length} 个子域名例外并核验生效',
+      color: verifiedCount == pending.length ? Colors.green : Colors.orange,
     );
   }
 
@@ -1078,16 +1515,33 @@ class _FalsePositiveAssistantModalState
   }
 
   Widget _buildRecentAndRuleSearchTab(ColorScheme colorScheme) {
-    final filtered = _blockedDomains.where((item) {
-      if (_searchQuery.isEmpty) return true;
-      return item.domain.toLowerCase().contains(_searchQuery) ||
-          item.ruleText.toLowerCase().contains(_searchQuery);
+    final normalizedHost =
+        _liveCheckReport?.parsedInput.normalizedHost ?? '';
+    final effectiveQuery =
+        normalizedHost.isNotEmpty ? normalizedHost : _searchQuery;
+
+    final filteredGroups = _aggregatedHistory.where((item) {
+      if (effectiveQuery.isEmpty) return true;
+      final dl = item.domain.toLowerCase();
+      if (dl.contains(effectiveQuery)) return true;
+      if (_searchQuery.isNotEmpty && dl.contains(_searchQuery)) return true;
+      for (final r in item.matchedRules) {
+        if (r.text.toLowerCase().contains(effectiveQuery) ||
+            (_searchQuery.isNotEmpty &&
+                r.text.toLowerCase().contains(_searchQuery))) {
+          return true;
+        }
+      }
+      return false;
     }).toList();
 
-    final recentDomainSet = filtered.map((e) => e.domain.toLowerCase()).toSet();
+    final recentDomainSet =
+        filteredGroups.map((e) => e.domain.toLowerCase()).toSet();
     final extraRuleMatches = _ruleMatches
         .where((m) => !recentDomainSet.contains((m['domain'] ?? '').toLowerCase()))
         .toList();
+    final hasLiveCard =
+        _liveParseError != null || _checkingLiveHost || _liveCheckReport != null;
 
     return Column(
       children: [
@@ -1095,16 +1549,33 @@ class _FalsePositiveAssistantModalState
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
           child: TextField(
             controller: _searchController,
+            onSubmitted: (val) => _triggerLiveCheckForInput(val),
             decoration: InputDecoration(
               isDense: true,
               prefixIcon: const Icon(Icons.search_rounded, size: 20),
-              hintText: '搜索最近拦截域名或直接检索规则库 (如 woozooo)…',
-              suffixIcon: _searchQuery.isNotEmpty
-                  ? IconButton(
+              hintText: '输入链接或域名实时检规则（如 SendGrid 追踪 URL 或域名）…',
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_searchController.text.isNotEmpty)
+                    IconButton(
                       icon: const Icon(Icons.clear_rounded, size: 18),
                       onPressed: () => _searchController.clear(),
-                    )
-                  : null,
+                    ),
+                  IconButton(
+                    tooltip: '粘贴链接/域名',
+                    icon: const Icon(Icons.content_paste_rounded, size: 18),
+                    onPressed: () async {
+                      final data = await Clipboard.getData(Clipboard.kTextPlain);
+                      final txt = data?.text?.trim() ?? '';
+                      if (txt.isNotEmpty && mounted) {
+                        _searchController.text = txt;
+                        _triggerLiveCheckForInput(txt);
+                      }
+                    },
+                  ),
+                ],
+              ),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
               ),
@@ -1115,20 +1586,32 @@ class _FalsePositiveAssistantModalState
             ),
           ),
         ),
+        if (hasLiveCard)
+          LiveRuleDiagnosticCard(
+            rawQuery: _searchController.text,
+            parseError: _liveParseError,
+            checking: _checkingLiveHost,
+            report: _liveCheckReport,
+            outcomesByRule: _exceptionOutcomes,
+            writeBusy: _writingException,
+            onApplyException: (rule, {required confirmBroad}) =>
+                _applyExceptionRule(rule, confirmBroad: confirmBroad),
+            onUndoException: _undoExceptionRule,
+          ),
         const Divider(height: 1),
         Expanded(
           child: _loading
               ? const Center(child: CircularProgressIndicator())
-              : (filtered.isEmpty &&
+              : (filteredGroups.isEmpty &&
                       extraRuleMatches.isEmpty &&
                       !_searchingRules)
                   ? Center(
                       child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 24),
                         child: Text(
-                          _searchQuery.isNotEmpty
-                              ? '未在最近拦截与本地规则库中找到 "$_searchQuery"\n提示：若网页或应用加载异常但不知具体域名，请点击上方「网页排错」或「应用排错」'
-                              : '最近暂无拦截记录',
+                          effectiveQuery.isNotEmpty
+                              ? '历史记录与本地规则文件未匹配 "$effectiveQuery"。\n提示：上方「实时规则检测」直接向核心查询当前规则命中状态，不受历史日志覆盖影响。'
+                              : '最近暂无拦截历史事件',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             fontSize: 13,
@@ -1140,23 +1623,43 @@ class _FalsePositiveAssistantModalState
                   : ListView(
                       physics: const BouncingScrollPhysics(),
                       children: [
-                        if (filtered.isNotEmpty) ...[
-                          if (_searchQuery.isNotEmpty)
-                            Padding(
-                              padding:
-                                  const EdgeInsets.fromLTRB(16, 10, 16, 4),
-                              child: Text(
-                                '最近拦截记录 (${filtered.length})',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: colorScheme.primary,
-                                ),
+                        if (_usingLegacyLogFallback)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 2),
+                            child: Text(
+                              '提示：当前核心版本不支持近期阻断摘要接口，已兼容回退至近期日志，高频重试时较早记录可能被挤出。',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.orange.shade900,
                               ),
                             ),
-                          ...filtered.map(
-                            (item) => _buildBlockedSummaryTile(
-                              item,
+                          )
+                        else if (filteredGroups.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 2),
+                            child: Text(
+                              '历史事件 · 来自核心有限内存摘要（最多保留 5 分钟 / 256 条聚合事件）',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                        if (filteredGroups.isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                            child: Text(
+                              '历史事件 (${filteredGroups.length})',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: colorScheme.primary,
+                              ),
+                            ),
+                          ),
+                          ...filteredGroups.map(
+                            (group) => _buildAggregatedHistoryTile(
+                              group,
                               colorScheme,
                             ),
                           ),
@@ -1178,7 +1681,7 @@ class _FalsePositiveAssistantModalState
                           Padding(
                             padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                             child: Text(
-                              '规则库深度检索命中 (${extraRuleMatches.length})',
+                              '本地规则文本补充匹配 (${extraRuleMatches.length})',
                               style: TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.bold,
@@ -1248,6 +1751,15 @@ class _FalsePositiveAssistantModalState
                                 domain,
                                 isUnblocked,
                                 isBusy,
+                                matchedRules: rule.isNotEmpty
+                                    ? [
+                                        MatchedRuleInfo(
+                                          text: rule,
+                                          filterListId: 0,
+                                          sourceName: filterName,
+                                        ),
+                                      ]
+                                    : const [],
                               ),
                             );
                           }),
@@ -1256,6 +1768,77 @@ class _FalsePositiveAssistantModalState
                     ),
         ),
       ],
+    );
+  }
+
+  Widget _buildAggregatedHistoryTile(
+    AggregatedLogGroup group,
+    ColorScheme colorScheme,
+  ) {
+    final isUnblocked = _unblockedDomains.contains(group.domain);
+    final isBusy = _unblockingInProgress.contains(group.domain);
+    final protoLabel = group.isSni ? 'SNI' : 'DNS';
+    final badgeColor = group.isSni ? Colors.purple : Colors.red;
+    final hhmmss = convertTimestampLocalTimezone(group.time, 'HH:mm:ss');
+    final ruleSummary = group.matchedRules.isNotEmpty
+        ? group.matchedRules
+            .map((r) => '[${r.sourceName}] ${r.text}')
+            .join(' | ')
+        : group.reason;
+
+    return ListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      onTap: () => showAggregatedGroupDetailDialog(
+        context,
+        group: group,
+        onApplyException: (rule, {required confirmBroad}) =>
+            _applyExceptionRule(
+          rule,
+          confirmBroad: confirmBroad,
+          verifyHostOverride: group.domain,
+        ),
+      ),
+      title: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+            decoration: BoxDecoration(
+              color: badgeColor.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: Text(
+              protoLabel,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+                color: badgeColor,
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              group.domain,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+            ),
+          ),
+        ],
+      ),
+      subtitle: Text(
+        '$hhmmss · $protoLabel · 重复 ${group.count} 次 · ${group.reason} · $ruleSummary',
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 11.5, color: colorScheme.onSurfaceVariant),
+      ),
+      trailing: _buildUnblockButton(
+        group.domain,
+        isUnblocked,
+        isBusy,
+        matchedRules: group.matchedRules,
+      ),
     );
   }
 
@@ -1827,7 +2410,12 @@ class _FalsePositiveAssistantModalState
           color: colorScheme.onSurfaceVariant,
         ),
       ),
-      trailing: _buildUnblockButton(item.domain, isUnblocked, isBusy),
+      trailing: _buildUnblockButton(
+        item.domain,
+        isUnblocked,
+        isBusy,
+        matchedRules: item.group?.matchedRules ?? const [],
+      ),
     );
   }
 
@@ -1838,6 +2426,12 @@ class _FalsePositiveAssistantModalState
     final isUnblocked = _unblockedDomains.contains(item.domain);
     final isBusy = _unblockingInProgress.contains(item.domain);
     final effectiveBlocked = item.blocked && !isUnblocked;
+    final badgeColor = item.isError
+        ? Colors.orange.shade800
+        : (effectiveBlocked ? Colors.red : Colors.green);
+    final badgeText = item.isError
+        ? '查询失败'
+        : (effectiveBlocked ? '被拦截' : '正常');
 
     return ListTile(
       dense: true,
@@ -1853,16 +2447,15 @@ class _FalsePositiveAssistantModalState
               vertical: 1.5,
             ),
             decoration: BoxDecoration(
-              color: (effectiveBlocked ? Colors.red : Colors.green)
-                  .withValues(alpha: 0.12),
+              color: badgeColor.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(5),
             ),
             child: Text(
-              effectiveBlocked ? '被拦截' : '正常',
+              badgeText,
               style: TextStyle(
                 fontSize: 10,
                 fontWeight: FontWeight.bold,
-                color: effectiveBlocked ? Colors.red : Colors.green,
+                color: badgeColor,
               ),
             ),
           ),
@@ -1889,18 +2482,32 @@ class _FalsePositiveAssistantModalState
         overflow: TextOverflow.ellipsis,
         style: TextStyle(
           fontSize: 11.5,
-          color: effectiveBlocked ? Colors.red : colorScheme.onSurfaceVariant,
+          color: item.isError
+              ? Colors.orange.shade900
+              : (effectiveBlocked ? Colors.red : colorScheme.onSurfaceVariant),
         ),
       ),
       trailing: (item.blocked || isUnblocked)
-          ? _buildUnblockButton(item.domain, isUnblocked, isBusy)
+          ? _buildUnblockButton(
+              item.domain,
+              isUnblocked,
+              isBusy,
+              matchedRules: item.matchedRules,
+            )
           : null,
     );
   }
 
-  Widget _buildUnblockButton(String domain, bool isUnblocked, bool isBusy) {
+  Widget _buildUnblockButton(
+    String domain,
+    bool isUnblocked,
+    bool isBusy, {
+    List<MatchedRuleInfo> matchedRules = const [],
+  }) {
     return FilledButton.tonal(
-      onPressed: isUnblocked || isBusy ? null : () => _unblockDomain(domain),
+      onPressed: isUnblocked || isBusy
+          ? null
+          : () => _unblockDomain(domain, matchedRules: matchedRules),
       style: FilledButton.styleFrom(
         visualDensity: VisualDensity.compact,
         padding: const EdgeInsets.symmetric(horizontal: 12),

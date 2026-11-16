@@ -12,6 +12,8 @@ void showSnackbar({
   Color? labelColor,
   GlobalKey<ScaffoldMessengerState>? key,
   Duration? duration,
+  String? actionLabel,
+  VoidCallback? onAction,
 }) async {
   final GlobalKey<ScaffoldMessengerState> scaffoldKey = key ?? scaffoldMessengerKey;
   if (appConfigProvider.showingSnackbar == true) {
@@ -29,6 +31,13 @@ void showSnackbar({
     ),
     backgroundColor: color,
     duration: duration ?? const Duration(seconds: 4),
+    action: (actionLabel != null && onAction != null)
+        ? SnackBarAction(
+            label: actionLabel,
+            textColor: labelColor ?? Colors.white,
+            onPressed: onAction,
+          )
+        : null,
   );
   scaffoldKey.currentState?.showSnackBar(snackBar).closed.then(
     (value) => appConfigProvider.setShowingSnackbar(false)

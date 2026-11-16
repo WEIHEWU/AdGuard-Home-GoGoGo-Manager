@@ -93,9 +93,20 @@ class ApiClientV2 {
     String? responseStatus,
     String? search,
   }) async {
+    final qParams = <String, String>{
+      if (count != null) 'limit': '$count',
+      if (offset != null) 'offset': '$offset',
+      if (olderThan != null) 'older_than': olderThan.toIso8601String(),
+      if (responseStatus != null && responseStatus.isNotEmpty)
+        'response_status': responseStatus,
+      if (search != null && search.isNotEmpty) 'search': search,
+    };
+    final path = Uri(
+      path: '/querylog',
+      queryParameters: qParams.isEmpty ? null : qParams,
+    ).toString();
     final result = await HttpRequestClient.get(
-      urlPath:
-          '/querylog?${count != null ? 'limit=$count' : ''}${offset != null ? '&offset=$offset' : ''}${olderThan != null ? '&older_than=${olderThan.toIso8601String()}' : ''}${responseStatus != null ? '&response_status=$responseStatus' : ''}${search != null ? '&search=$search' : ''}',
+      urlPath: path,
       server: server,
     );
     if (result.successful == true && result.body != null) {
@@ -108,8 +119,59 @@ class ApiClientV2 {
         return const ApiResponse(successful: false);
       }
     } else {
-      return const ApiResponse(successful: false);
+      return ApiResponse(
+        successful: false,
+        statusCode: result.statusCode,
+      );
     }
+  }
+
+  /// 读取核心有界的近期阻断聚合诊断摘要（/control/querylog/blocked_summary）。
+  Future<ApiResponse> getBlockedSummary({
+    int limit = 256,
+    String? search,
+  }) async {
+    final qParams = <String, String>{
+      'limit': '$limit',
+      if (search != null && search.trim().isNotEmpty) 'search': search.trim(),
+    };
+    final path = Uri(
+      path: '/querylog/blocked_summary',
+      queryParameters: qParams,
+    ).toString();
+    final result = await HttpRequestClient.get(
+      urlPath: path,
+      server: server,
+      timeout: 5,
+    );
+    if (result.successful == true && result.body != null) {
+      try {
+        final decoded = jsonDecode(result.body!);
+        if (decoded is Map) {
+          return ApiResponse(
+            successful: true,
+            content: Map<String, dynamic>.from(decoded),
+            statusCode: result.statusCode,
+          );
+        }
+        return ApiResponse(
+          successful: false,
+          statusCode: result.statusCode,
+          content: 'invalid_json_shape',
+        );
+      } catch (e) {
+        return ApiResponse(
+          successful: false,
+          statusCode: result.statusCode,
+          content: e.toString(),
+        );
+      }
+    }
+    return ApiResponse(
+      successful: false,
+      statusCode: result.statusCode,
+      content: result.exception?.name ?? 'request_failed',
+    );
   }
 
   Future<ApiResponse> getFilteringRules() async {
@@ -321,15 +383,43 @@ class ApiClientV2 {
     return ApiResponse(successful: result.successful);
   }
 
-  Future<ApiResponse> checkHostFiltered({required String host}) async {
+  Future<ApiResponse> checkHostFiltered({
+    required String host,
+    String? qtype,
+  }) async {
+    final qParams = <String, String>{
+      'name': host,
+      if (qtype != null && qtype.isNotEmpty) 'qtype': qtype,
+    };
+    final path = Uri(
+      path: '/filtering/check_host',
+      queryParameters: qParams,
+    ).toString();
     final result = await HttpRequestClient.get(
-      urlPath: '/filtering/check_host?name=$host',
+      urlPath: path,
       server: server,
+      timeout: 5,
     );
-    if (result.successful) {
-      return ApiResponse(successful: true, content: jsonDecode(result.body!));
+    if (result.successful && result.body != null) {
+      try {
+        return ApiResponse(
+          successful: true,
+          content: jsonDecode(result.body!),
+          statusCode: result.statusCode,
+        );
+      } catch (e) {
+        return ApiResponse(
+          successful: false,
+          statusCode: result.statusCode,
+          content: e.toString(),
+        );
+      }
     } else {
-      return const ApiResponse(successful: false);
+      return ApiResponse(
+        successful: false,
+        statusCode: result.statusCode,
+        content: result.exception?.name ?? 'request_failed',
+      );
     }
   }
 

@@ -56,6 +56,7 @@ class Log {
   final int? filterId;
   final String? rule;
   final List<Answer>? originalAnswer;
+  final bool predictedBlocked;
 
   Log({
     this.answerDnssec,
@@ -75,6 +76,7 @@ class Log {
     this.filterId,
     this.rule,
     this.originalAnswer,
+    this.predictedBlocked = false,
   });
 
   factory Log.fromJson(Map<String, dynamic> json) => Log(
@@ -95,6 +97,7 @@ class Log {
     filterId: json["filterId"],
     rule: json["rule"],
     originalAnswer: json["original_answer"] == null ? null : List<Answer>.from(json["original_answer"].map((x) => Answer.fromJson(x))),
+    predictedBlocked: json["predicted_blocked"] == true,
   );
 
   Map<String, dynamic> toJson() => {
@@ -115,6 +118,7 @@ class Log {
     "filterId": filterId,
     "rule": rule,
     "original_answer": originalAnswer == null ? null : List<dynamic>.from(originalAnswer!.map((x) => x.toJson())),
+    if (predictedBlocked) "predicted_blocked": true,
   };
 }
 

@@ -669,5 +669,80 @@ void main() {
       expect(executedModes, ['cn', 'overseas', 'cn']);
       expect(finalMode, 'cn');
     });
+
+    test('5. propagates op_id & queue wait duration and parses metadata fields from AGH_SWITCH_RESULT', () async {
+      final capturedCmds = <String>[];
+      final completers = <Completer<ProcessResult>>[];
+
+      Future<ProcessResult> runner(String executable, List<String> arguments) async {
+        final cmd = arguments.length >= 2 ? arguments[1] : '';
+        if (cmd == 'id -u') {
+          return ProcessResult(1, 0, '0\n', '');
+        }
+        if (cmd.contains('switch_mode.sh')) {
+          capturedCmds.add(cmd);
+          final c = Completer<ProcessResult>();
+          completers.add(c);
+          return c.future;
+        }
+        return ProcessResult(2, 0, '', '');
+      }
+
+      final service = ModuleConfigService(
+        isAndroidOverride: true,
+        processRunner: runner,
+      );
+
+      final fFirst = service.switchRunModeDetailed('cn');
+      await Future<void>.delayed(const Duration(milliseconds: 35));
+      final fSecond = service.switchRunModeDetailed('overseas');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      expect(capturedCmds.length, 1);
+      final firstOpMatch = RegExp(r'AGH_SWITCH_OP_ID=(mgr_[0-9]+)').firstMatch(capturedCmds[0]);
+      final firstWaitMatch = RegExp(r'AGH_QUEUE_WAIT_MS=([0-9]+)').firstMatch(capturedCmds[0]);
+      expect(firstOpMatch, isNotNull);
+      expect(firstWaitMatch, isNotNull);
+
+      completers[0].complete(
+        ProcessResult(
+          41,
+          0,
+          'AGH_SWITCH_RESULT status=ok stage=completed mode=cn op_id=${firstOpMatch!.group(1)} dns_port=55453 http_port=3000 total_ms=128\n',
+          '',
+        ),
+      );
+      final firstRes = await fFirst;
+      expect(firstRes.succeeded, isTrue);
+      expect(firstRes.opId, firstOpMatch.group(1));
+      expect(firstRes.dnsPort, 55453);
+      expect(firstRes.httpPort, 3000);
+      expect(firstRes.totalMs, 128);
+      expect(firstRes.scriptTotalMs, 128);
+      expect(firstRes.managerQueueWaitMs, isNotNull);
+      expect(firstRes.managerScriptWaitMs, greaterThanOrEqualTo(50));
+
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(capturedCmds.length, 2);
+      final secondWaitMatch = RegExp(r'AGH_QUEUE_WAIT_MS=([0-9]+)').firstMatch(capturedCmds[1]);
+      expect(secondWaitMatch, isNotNull);
+      expect(int.parse(secondWaitMatch!.group(1)!), greaterThanOrEqualTo(40));
+
+      completers[1].complete(
+        ProcessResult(
+          42,
+          0,
+          'AGH_SWITCH_RESULT status=ok stage=completed mode=overseas op_id=custom_op dns_port=55453 http_port=3000 total_ms=unavailable\n',
+          '',
+        ),
+      );
+      final secondRes = await fSecond;
+      expect(secondRes.succeeded, isTrue);
+      expect(secondRes.opId, 'custom_op');
+      expect(secondRes.httpPort, 3000);
+      expect(secondRes.scriptTotalMs, isNull);
+      expect(secondRes.managerQueueWaitMs, greaterThanOrEqualTo(40));
+      expect(secondRes.managerScriptWaitMs, isNotNull);
+    });
   });
 }

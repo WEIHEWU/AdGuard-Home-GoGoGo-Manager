@@ -21,21 +21,24 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.19
-          name: "AdGuard-Home-GoGoGo Manager v2.24.19"
+          tag_name: v2.24.22-rc.1
+          name: "AdGuard-Home-GoGoGo Manager v2.24.22-rc.1 (Pre-release)"
+          prerelease: true
+          make_latest: false
           body: |
-            ### AdGuard-Home-GoGoGo Manager `v2.24.19`
+            ### AdGuard-Home-GoGoGo Manager `v2.24.22-rc.1` (Candidate / Pre-release)
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            #### 🆕 v2.24.19 升级亮点（有序模式切换队列、非阻塞 Root 探测与后台省电优化）
-            - **目标感知有序模式切换队列与防重复重放**：
-              - 相同目标模式并发请求自动合并共享结果，不同目标（如 `cn -> overseas -> cn`）严格按序排队串行执行，调用方超时不破坏底层互斥锁；
-              - 拆分 Root 通道可用性探测（3 秒超时 + 失败熔断冷却）与实际业务命令执行，业务脚本返回非零时绝不跨多个 `su` 候选路径重复重放。
-            - **快捷磁贴 (`AGH GoGoGo`) 防堆积与主界面自适应轮询**：
-              - 状态栏磁贴引入非阻塞并发互斥与超时强制销毁子进程保护（`process.destroyForcibly()`），防止挂起耗尽协程池；
-              - App 退至后台或息屏时自动暂停状态轮询，回到前台立即同步并按稳定程度自适应拉长轮询间隔（`8s -> 20s`）。
-            - **全链路兼容 `v20261116.1` 满血 DNS + SNI (443/8443) 双链核心**：
-              - 同步检测 `nat` 表 `ADGUARD` 与 `mangle` 表 `AGH_SNI` 双链健康度，支持海外/国内双模无损热切换与临时 Root 软重启自愈。
+            > ⚠️ Candidate pre-release: core unit/race tests, Flutter static analysis, widget/HTTP mock tests (`31/31`), and APK signature/ABI verification passed; on-device Android verification (real SNI click retries & calendar jump) is pending.
+
+            #### 🆕 v2.24.22-rc.1 升级亮点（误杀排错联动升级 + 一键诊断包）
+            - **误杀排错 Core + Manager 全链路联动**：
+              - 离线域名解析 `DomainInputParser`（剥离包装/端口、末尾点、IDN Punycode、`co.uk` 等多级公共后缀边界保护、拒绝多 URL/非 http scheme 误拼接）；
+              - 实时规则批量检测 `RuleBatchChecker`（`Uri.queryParameters` 安全编码、并发 `<=3`、5 秒超时、错误绝不伪装为“正常放行”、原域名 + 多级父域名辅助检测、输入切换/切换服务器自动作废过期响应）；
+              - 最近拦截优先级识别 `FilteredSNI` / `NotFilteredSNI`，默认同秒同域名同原因聚合折叠，接入 Core `/control/querylog/blocked_summary` 内存摘要防高频重试挤掉首条关键阻断；
+              - 显式两级加白闭环：精确区分“仅放行当前域及子域 (`@@||host^`)”与“放行触发规则域名”并二次确认，保留既有顺序及注释的串行写入、回读校验、清缓存、复检辨别 `$important`，以及一键精确撤销；
+            - **详细调试日志开关与一键诊断包导出**：
+              - 支持定时自动关闭（默认 30 分钟）的模块详细调试日志开关，全链路脱敏预览及 ZIP 诊断包生成与系统分享。
           files: |
             releases/AdGuardHomeManager.apk
