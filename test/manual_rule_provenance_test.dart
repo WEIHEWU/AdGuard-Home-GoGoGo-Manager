@@ -64,6 +64,8 @@ class _MockCoreEnv {
   bool failNextSetRules = false;
   bool forceConflictNextSetRules = false;
   bool failNextReadbackAfterSet = false;
+  bool omitRevision = false;
+  void Function()? onAfterSetRulesBeforeReadback;
   bool _failNextGetStatusArmed = false;
   int setRulesPostCount = 0;
   int getStatusCount = 0;
@@ -130,7 +132,7 @@ class _MockCoreEnv {
                 },
               ],
               'user_rules': env.rules,
-              'user_rules_revision': env.currentRev(),
+              if (!env.omitRevision) 'user_rules_revision': env.currentRev(),
               'interval': 24,
               'enabled': true,
             }));
@@ -157,12 +159,20 @@ class _MockCoreEnv {
               ..clear()
               ..addAll((body['rules'] as List).map((e) => e.toString()));
             env.epoch++;
+            final committedRev = env.currentRev();
+            if (env.onAfterSetRulesBeforeReadback != null) {
+              final cb = env.onAfterSetRulesBeforeReadback!;
+              env.onAfterSetRulesBeforeReadback = null;
+              cb();
+            }
             if (env.failNextReadbackAfterSet) {
               env.failNextReadbackAfterSet = false;
               env._failNextGetStatusArmed = true;
             }
             req.response.statusCode = 200;
-            req.response.headers.set('X-User-Rules-Revision', env.currentRev());
+            if (!env.omitRevision) {
+              req.response.headers.set('X-User-Rules-Revision', committedRev);
+            }
           }
         }
       } else if (path == '/control/filtering/check_host') {
@@ -539,15 +549,14 @@ void main() {
       );
       expect(impRes.importedCount, 2);
       expect(provCorrupted.hasStorageError, isFalse);
-      expect(
-        provCorrupted
-            .resolveCustomListRowDisplay(
-              serverKey: keyA,
-              rawRule: '@@||alpha.example^',
-            )
-            .label,
-        '手动放行',
+      final importedAlphaDisp = provCorrupted.resolveCustomListRowDisplay(
+        serverKey: keyA,
+        rawRule: '@@||alpha.example^',
       );
+      // 导入备份默认降为“来源待确认”（不直接恢复成“已确认”），同时保留历史来源、时间与备注
+      expect(importedAlphaDisp.label, '来源待确认');
+      expect(importedAlphaDisp.record!.historicalActionLabel, '手动放行');
+      expect(importedAlphaDisp.record!.note, 'Mail tracking fix');
 
       // Write failure on provenance store does NOT roll back Core rule!
       await HttpOverrides.runWithHttpOverrides(() async {
@@ -588,20 +597,24 @@ void main() {
         ManualRuleSyncStatus.missing,
       );
 
-      // Re-appears externally -> MUST become unconfirmed ("来源未确认")
+      // Re-appears externally -> MUST become unconfirmed ("来源待确认")
       await prov.syncWithCoreRules(
         serverKey: 'srv1',
         coreRules: ['@@||ext.example.com^'],
+        currentRevision: 'v2:inst1:2',
       );
       final recAfterReadd = prov.findRecordsForRule('srv1', '@@||ext.example.com^').single;
       expect(recAfterReadd.syncStatus, ManualRuleSyncStatus.unconfirmed);
-      expect(recAfterReadd.primaryLabel, '来源未确认');
+      expect(recAfterReadd.primaryLabel, '来源待确认');
+      expect(recAfterReadd.historicalOriginLabel, '手动新增');
+      expect(recAfterReadd.associationStatusLabel, '待确认');
 
       // Existing legacy/external unrecorded rule claimed explicitly by user
       final claimedOk = await prov.claimExistingRule(
         serverKey: 'srv1',
         ruleText: '||legacy.example.com^',
         latestCoreRules: ['@@||ext.example.com^', '||legacy.example.com^'],
+        confirmedRevision: 'v2:inst1:2',
         note: 'Legacy rule claimed by me',
       );
       expect(claimedOk, isTrue);
@@ -610,6 +623,7 @@ void main() {
       expect(claimedRec.createdAt, isNull);
       expect(claimedRec.claimedAt, isNotNull);
       expect(claimedRec.primaryLabel, '用户认领');
+      expect(claimedRec.syncStatus, ManualRuleSyncStatus.present);
     });
 
     test('11, 12, 13. Remove metadata only preserves Core; remove rule checks duplicates & expected_revision; ExceptionUndoToken remains strict', () async {
@@ -792,10 +806,12 @@ void main() {
               '@@||gone.example.org^',
             ],
             entryPoint: '误杀排错',
+            confirmedRevision: env.currentRev(),
           );
           await prov.syncWithCoreRules(
             serverKey: ServerRuleWriteQueue.serverKeyFor(env.serverModel),
             coreRules: env.rules,
+            currentRevision: env.currentRev(),
           );
 
           final srvProvider = ServersProvider()
@@ -1008,6 +1024,314 @@ void main() {
       await tester.tap(find.text('manual.example.com'));
       await tester.pumpAndSettle();
       expect(find.text('手动放行'), findsOneWidget);
+    });
+  });
+
+  group('RC4 Patch: Commit-Bound Provenance, Unobserved Drift, Restart & Import Security', () {
+    test('S1. Concurrent external add between POST and readback never gets misattributed; interrupts provenance without rolling back Core; legacy Core lowers strength', () async {
+      await HttpOverrides.runWithHttpOverrides(() async {
+        final env = await _MockCoreEnv.start(
+          initialRules: ['||base.example.org^'],
+        );
+        addTearDown(env.close);
+
+        final prov = ManualRuleProvenanceService(
+          backend: InMemoryManualRuleProvenanceStoreBackend(),
+          nowProvider: () => DateTime.utc(2026, 11, 17, 13, 0, 0),
+        );
+        final srvKey = ServerRuleWriteQueue.serverKeyFor(env.serverModel);
+        final srvProvider = ServersProvider()
+          ..setSelectedServer(env.serverModel)
+          ..setApiClient2(env.apiClient);
+        final fp = FilteringProvider(provenanceService: prov)
+          ..update(srvProvider, null);
+        final sp = StatusProvider(provenanceService: prov)
+          ..update(srvProvider)
+          ..setServerStatusData(data: _makeDummyServerStatus(env.rules));
+
+        // 1A) FilteringProvider: concurrent client injects '||evil-external.example^' after POST, before readback
+        env.onAfterSetRulesBeforeReadback = () {
+          env.rules.add('||evil-external.example^');
+          env.epoch++;
+        };
+        final addInt = await fp.addCustomRuleDetailed('@@||mine-interrupted.example^');
+        expect(addInt.ok, isTrue);
+        expect(addInt.provenanceInterrupted, isTrue);
+        expect(addInt.message, contains('规则操作已提交，但来源确认被其他更新打断'));
+        // UI reflects actual Core state, does NOT roll back external rule, and NEVER attributes external rule to user!
+        expect(fp.filtering!.userRules, contains('||evil-external.example^'));
+        expect(fp.filtering!.userRules, contains('@@||mine-interrupted.example^'));
+        expect(prov.findRecordsForRule(srvKey, '||evil-external.example^'), isEmpty);
+        expect(prov.findRecordsForRule(srvKey, '@@||mine-interrupted.example^'), isEmpty);
+
+        // 1B) StatusProvider: concurrent external injection between POST and readback
+        env.onAfterSetRulesBeforeReadback = () {
+          env.rules.add('||evil-status-ext.example^');
+          env.epoch++;
+        };
+        final logInt = await sp.blockUnblockDomainDetailed(
+          domain: 'mine-log.example',
+          newStatus: 'block',
+        );
+        expect(logInt.ok, isTrue);
+        expect(logInt.provenanceInterrupted, isTrue);
+        expect(logInt.message, contains('规则操作已提交，但来源确认被其他更新打断'));
+        expect(prov.findRecordsForRule(srvKey, '||evil-status-ext.example^'), isEmpty);
+        expect(prov.findRecordsForRule(srvKey, '||mine-log.example^\$important'), isEmpty);
+
+        // 1C) ExceptionRuleCoordinator: concurrent external injection between POST and readback
+        final coord = ExceptionRuleCoordinator();
+        env.onAfterSetRulesBeforeReadback = () {
+          env.rules.add('||evil-tp-ext.example^');
+          env.epoch++;
+        };
+        final tpInt = await coord.applyExceptionAndVerify(
+          apiClient: env.apiClient,
+          verifyHost: 'tp-interrupted.example',
+          exceptionRule: '@@||tp-interrupted.example^',
+          provenanceService: prov,
+        );
+        expect(tpInt.writeSucceeded, isTrue);
+        expect(tpInt.provenanceInterrupted, isTrue);
+        expect(tpInt.undoToken, isNull);
+        expect(tpInt.message, contains('规则操作已提交，但来源确认被其他更新打断'));
+        expect(prov.findRecordsForRule(srvKey, '||evil-tp-ext.example^'), isEmpty);
+        expect(prov.findRecordsForRule(srvKey, '@@||tp-interrupted.example^'), isEmpty);
+
+        // 1D) Legacy Core without revision headers -> lowers strength to unconfirmed ("待确认"), never confirmed present!
+        env.omitRevision = true;
+        final legacyRes = await fp.addCustomRuleDetailed('@@||legacy-core.example^');
+        expect(legacyRes.ok, isTrue);
+        expect(legacyRes.provenanceLegacyUnconfirmed, isTrue);
+        final legacyRec = prov.findRecordsForRule(srvKey, '@@||legacy-core.example^').single;
+        expect(legacyRec.syncStatus, ManualRuleSyncStatus.unconfirmed);
+        expect(legacyRec.confirmedRevision, isNull);
+      }, _PassthroughHttpOverrides());
+    });
+
+    test('S2. Separates historical source from current association across unobserved delete+readd, external add, own add, Core restart, and duplicate appear/disappear', () async {
+      await HttpOverrides.runWithHttpOverrides(() async {
+        final env = await _MockCoreEnv.start(initialRules: []);
+        addTearDown(env.close);
+
+        final prov = ManualRuleProvenanceService(
+          backend: InMemoryManualRuleProvenanceStoreBackend(),
+          nowProvider: () => DateTime.utc(2026, 11, 17, 14, 0, 0),
+        );
+        final srvKey = ServerRuleWriteQueue.serverKeyFor(env.serverModel);
+        final srvProvider = ServersProvider()
+          ..setSelectedServer(env.serverModel)
+          ..setApiClient2(env.apiClient);
+        final fp = FilteringProvider(provenanceService: prov)
+          ..update(srvProvider, null);
+
+        // Client cleanly adds rule A -> confirmed ("手动放行" + "已确认")
+        expect((await fp.addCustomRuleDetailed('@@||rule-a.example^')).ok, isTrue);
+        final recA1 = prov.findRecordsForRule(srvKey, '@@||rule-a.example^').single;
+        expect(recA1.source, ManualRuleSource.manual);
+        expect(recA1.syncStatus, ManualRuleSyncStatus.present);
+        expect(recA1.confirmedRevision, env.currentRev());
+
+        // Case 2a: This client normally adds another rule B on unbroken revision chain -> BOTH A and B remain "已确认"!
+        expect((await fp.addCustomRuleDetailed('@@||rule-b.example^')).ok, isTrue);
+        expect(prov.findRecordsForRule(srvKey, '@@||rule-a.example^').single.syncStatus, ManualRuleSyncStatus.present);
+        expect(prov.findRecordsForRule(srvKey, '@@||rule-b.example^').single.syncStatus, ManualRuleSyncStatus.present);
+
+        // Case 2b: External client adds X (unobserved version jump) -> A & B keep historical "手动新增", association drops to "待确认"!
+        env.rules.add('||external-x.example^');
+        env.epoch++;
+        await fp.fetchFilters();
+        final recA2 = prov.findRecordsForRule(srvKey, '@@||rule-a.example^').single;
+        expect(recA2.historicalOriginLabel, '手动新增');
+        expect(recA2.associationStatusLabel, '待确认');
+        expect(recA2.createdAt, isNotNull);
+        expect(prov.findRecordsForRule(srvKey, '||external-x.example^'), isEmpty);
+
+        // Case 2c: Re-establishing a new rule C by this client MUST NOT accidentally confirm already-unconfirmed A!
+        expect((await fp.addCustomRuleDetailed('@@||rule-c.example^')).ok, isTrue);
+        expect(prov.findRecordsForRule(srvKey, '@@||rule-c.example^').single.syncStatus, ManualRuleSyncStatus.present);
+        expect(prov.findRecordsForRule(srvKey, '@@||rule-a.example^').single.syncStatus, ManualRuleSyncStatus.unconfirmed);
+
+        // Case 2d: External deletes C and re-adds exact same C WITHOUT Manager seeing the missing state -> C drops to "待确认"!
+        env.rules.remove('@@||rule-c.example^');
+        env.epoch++;
+        env.rules.add('@@||rule-c.example^');
+        env.epoch++;
+        await fp.fetchFilters();
+        final recCAfterUnobserved = prov.findRecordsForRule(srvKey, '@@||rule-c.example^').single;
+        expect(recCAfterUnobserved.historicalOriginLabel, '手动新增');
+        expect(recCAfterUnobserved.syncStatus, ManualRuleSyncStatus.unconfirmed);
+        expect(prov.resolveCustomListRowDisplay(serverKey: srvKey, rawRule: '@@||rule-c.example^').label, '来源待确认');
+
+        // User explicitly claims C at current revision -> establishes fresh "用户认领" + "已确认"
+        expect(await fp.claimExistingCustomRule('@@||rule-c.example^', note: 'Re-claimed C'), isTrue);
+        final recCClaimed = prov.findRecordsForRule(srvKey, '@@||rule-c.example^').single;
+        expect(recCClaimed.source, ManualRuleSource.claimed);
+        expect(recCClaimed.syncStatus, ManualRuleSyncStatus.present);
+        expect(recCClaimed.createdAt, isNull);
+        expect(recCClaimed.claimedAt, isNotNull);
+
+        // Case 2e: Core restarts with identical rules AND identical epoch counter, only instance ID changes -> C drops to "待确认"!
+        final sameEpoch = env.epoch;
+        env.coreInstance = 'inst2_restarted';
+        env.epoch = sameEpoch;
+        await fp.fetchFilters();
+        final recCAfterRestart = prov.findRecordsForRule(srvKey, '@@||rule-c.example^').single;
+        expect(recCAfterRestart.historicalOriginLabel, '用户认领');
+        expect(recCAfterRestart.syncStatus, ManualRuleSyncStatus.unconfirmed);
+        expect(recCAfterRestart.note, 'Re-claimed C');
+
+        // Case 2f: Duplicate identical rules appear -> duplicateAmbiguous -> then 1 copy removed externally -> transitions to unconfirmed ("待确认"), NEVER present!
+        expect((await fp.addCustomRuleDetailed('@@||dup-drift.example^')).ok, isTrue);
+        expect(prov.findRecordsForRule(srvKey, '@@||dup-drift.example^').single.syncStatus, ManualRuleSyncStatus.present);
+        env.rules.add('@@||dup-drift.example^');
+        env.epoch++;
+        await fp.fetchFilters();
+        expect(prov.findRecordsForRule(srvKey, '@@||dup-drift.example^').single.syncStatus, ManualRuleSyncStatus.duplicateAmbiguous);
+
+        env.rules.removeLast();
+        env.epoch++;
+        await fp.fetchFilters();
+        expect(prov.findRecordsForRule(srvKey, '@@||dup-drift.example^').single.syncStatus, ManualRuleSyncStatus.unconfirmed);
+      }, _PassthroughHttpOverrides());
+    });
+
+    test('S3. Import provenance backup never self-certifies as present, preserves notes/history, validates enums strictly, protects local trusted records, and never writes Core', () async {
+      final prov = ManualRuleProvenanceService(
+        backend: InMemoryManualRuleProvenanceStoreBackend(),
+        nowProvider: () => DateTime.utc(2026, 11, 17, 15, 0, 0),
+      );
+      const localSrv = 'srv_new|http|127.0.0.1|3000';
+
+      // Seed one existing trusted "present" manual rule locally
+      await prov.recordManualAdditions(
+        serverKey: localSrv,
+        addedRules: ['@@||trusted-local.example^'],
+        entryPoint: '误杀排错',
+        confirmedRevision: 'v2:inst1:10',
+        note: 'Keep my trusted note',
+      );
+
+      // Build malicious/over-claiming backup JSON from old server claiming sync_status="present" + old revision
+      final oldBackup = jsonEncode({
+        'schema_version': 1,
+        'records_by_server': {
+          'srv_old|http|127.0.0.1|3000': [
+            {
+              'record_id': 'old_1',
+              'server_key': 'srv_old|http|127.0.0.1|3000',
+              'rule_text': '@@||same-text-imported.example^',
+              'action': 'allow',
+              'source': 'manual',
+              'entry_point': '误杀排错',
+              'created_at': '2026-11-10T08:00:00Z',
+              'updated_at': '2026-11-10T08:00:00Z',
+              'note': 'Historical note preserved',
+              'confirmed_revision': 'v2:old_inst:99',
+              'sync_status': 'present',
+            },
+            {
+              'record_id': 'old_2',
+              'server_key': 'srv_old|http|127.0.0.1|3000',
+              'rule_text': '||deleted-never-create.example^',
+              'action': 'block',
+              'source': 'claimed',
+              'entry_point': '自定义规则-主动认领',
+              'claimed_at': '2026-11-11T08:00:00Z',
+              'updated_at': '2026-11-11T08:00:00Z',
+              'sync_status': 'present',
+            },
+            {
+              'record_id': 'old_3',
+              'server_key': 'srv_old|http|127.0.0.1|3000',
+              'rule_text': '@@||trusted-local.example^',
+              'action': 'allow',
+              'source': 'claimed',
+              'entry_point': '旧导入冲突',
+              'claimed_at': '2026-11-12T08:00:00Z',
+              'updated_at': '2099-01-01T00:00:00Z',
+              'note': 'Attempted overwrite note',
+              'sync_status': 'unconfirmed',
+            },
+          ],
+        },
+      });
+
+      final currentCoreRules = <String>[
+        '@@||trusted-local.example^',
+        '@@||same-text-imported.example^',
+      ];
+      final res = await prov.importBackupJson(
+        oldBackup,
+        importIntoServerKey: localSrv,
+        currentCoreRulesForTargetServer: currentCoreRules,
+      );
+      expect(res.importedCount, 2);
+      expect(res.skippedCount, 1);
+
+      // 1) Imported rule present in Core CANNOT become present ("已确认") — must stay "待确认", keeping history & note!
+      final importedSameText = prov.findRecordsForRule(localSrv, '@@||same-text-imported.example^').single;
+      expect(importedSameText.syncStatus, ManualRuleSyncStatus.unconfirmed);
+      expect(importedSameText.confirmedRevision, isNull);
+      expect(importedSameText.source, ManualRuleSource.manual);
+      expect(importedSameText.note, 'Historical note preserved');
+      expect(importedSameText.createdAt, DateTime.utc(2026, 11, 10, 8, 0, 0));
+
+      // 2) Imported rule NOT in Core -> marked missing ("已不存在"), never creates Core rules!
+      final importedMissing = prov.findRecordsForRule(localSrv, '||deleted-never-create.example^').single;
+      expect(importedMissing.syncStatus, ManualRuleSyncStatus.missing);
+      expect(importedMissing.source, ManualRuleSource.claimed);
+      expect(currentCoreRules, isNot(contains('||deleted-never-create.example^')));
+
+      // 3) Existing local trusted "present" rule was NOT overwritten or downgraded by unconfirmed conflicting import!
+      final trustedLocal = prov.findRecordsForRule(localSrv, '@@||trusted-local.example^').single;
+      expect(trustedLocal.syncStatus, ManualRuleSyncStatus.present);
+      expect(trustedLocal.source, ManualRuleSource.manual);
+      expect(trustedLocal.confirmedRevision, 'v2:inst1:10');
+      expect(trustedLocal.note, 'Keep my trusted note');
+
+      // 4) Strict enum validation rejects unknown source / action / sync_status without defaulting to manual/present
+      for (final badField in [
+        {'source': 'auto_preset'},
+        {'action': 'redirect_magic'},
+        {'sync_status': 'verified_forever'},
+      ]) {
+        final badJson = jsonEncode({
+          'schema_version': 1,
+          'records_by_server': {
+            localSrv: [
+              {
+                'record_id': 'bad_1',
+                'server_key': localSrv,
+                'rule_text': '@@||bad-enum.example^',
+                'action': badField['action'] ?? 'allow',
+                'source': badField['source'] ?? 'manual',
+                'entry_point': 'test',
+                'created_at': '2026-11-10T08:00:00Z',
+                'updated_at': '2026-11-10T08:00:00Z',
+                'sync_status': badField['sync_status'] ?? 'unconfirmed',
+              },
+            ],
+          },
+        });
+        await expectLater(
+          prov.importBackupJson(badJson),
+          throwsFormatException,
+        );
+      }
+
+      // 5) Explicit user claim on imported unconfirmed record establishes new managed "用户认领" + "已确认" association
+      await prov.claimExistingRule(
+        serverKey: localSrv,
+        ruleText: '@@||same-text-imported.example^',
+        latestCoreRules: currentCoreRules,
+        confirmedRevision: 'v2:inst1:11',
+      );
+      final reclaimed = prov.findRecordsForRule(localSrv, '@@||same-text-imported.example^').single;
+      expect(reclaimed.source, ManualRuleSource.claimed);
+      expect(reclaimed.syncStatus, ManualRuleSyncStatus.present);
+      expect(reclaimed.confirmedRevision, 'v2:inst1:11');
+      expect(reclaimed.note, 'Historical note preserved');
     });
   });
 }

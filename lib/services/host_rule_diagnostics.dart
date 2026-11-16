@@ -1080,6 +1080,8 @@ class ExceptionWriteOutcome {
   final bool cacheFlushFailed;
   final bool conflictDetected;
   final bool provenanceSaveFailed;
+  final bool provenanceInterrupted;
+  final bool provenanceLegacyUnconfirmed;
   final String? addedRule;
   final ExceptionUndoToken? undoToken;
   final String? undoDisabledReason;
@@ -1096,6 +1098,8 @@ class ExceptionWriteOutcome {
     this.cacheFlushFailed = false,
     this.conflictDetected = false,
     this.provenanceSaveFailed = false,
+    this.provenanceInterrupted = false,
+    this.provenanceLegacyUnconfirmed = false,
     this.addedRule,
     this.undoToken,
     this.undoDisabledReason,
@@ -1154,8 +1158,16 @@ class ExceptionRuleCoordinator {
       ExceptionUndoToken? undoToken;
       String? undoDisabledReason;
       var provenanceSaveFailed = false;
+      var provenanceInterrupted = false;
+      var provenanceLegacyUnconfirmed = false;
       final prov = provenanceService ?? ManualRuleProvenanceService.instance;
-      if (!alreadyExists) {
+      if (alreadyExists) {
+        await prov.syncWithCoreRules(
+          serverKey: session.serverKey,
+          coreRules: existingRules,
+          currentRevision: filteringData.userRulesRevision,
+        );
+      } else {
         final updatedRules = List<String>.from(existingRules)..add(cleanRule);
         final expectedSubmittedFp =
             ServerRuleWriteQueue.fingerprintRules(updatedRules);
@@ -1167,8 +1179,16 @@ class ExceptionRuleCoordinator {
         );
         if (!setRes.successful) {
           if (setRes.statusCode == 409) {
-            // 外部客户端在读写窗口间并发修改了规则：立即重读刷新并返回明确冲突提示
-            await apiClient.getFiltering();
+            // 外部客户端在读写窗口间并发修改了规则：立即重读刷新并同步既有记录状态，绝不覆盖外部修改
+            final refreshRes = await apiClient.getFiltering();
+            if (refreshRes.successful && refreshRes.content is Filtering) {
+              final f = refreshRes.content as Filtering;
+              await prov.syncWithCoreRules(
+                serverKey: session.serverKey,
+                coreRules: f.userRules,
+                currentRevision: f.userRulesRevision,
+              );
+            }
             return const ExceptionWriteOutcome(
               writeSucceeded: false,
               verifiedUnblocked: false,
@@ -1199,19 +1219,23 @@ class ExceptionRuleCoordinator {
           final slotMatches = addedIdx < confirmedRules.length &&
               confirmedRules[addedIdx].trim() == cleanRule;
 
-          // 只有回读中真实包含该新增规则才记录手动来源；即使来源库写盘失败，也不回滚用户已确认写入的 Core 规则。
-          if (confirmedRules.any((r) => r.trim() == cleanRule)) {
-            final saved = await prov.recordManualAdditions(
-              serverKey: session.serverKey,
-              addedRules: [cleanRule],
-              entryPoint: entryPoint,
-              confirmedRevision: committedRev ?? readbackRev,
-              coreCountsAfterWrite:
-                  RuleListDiffResult.countExactRules(confirmedRules),
-            );
-            if (!saved) {
-              provenanceSaveFailed = true;
-            }
+          // 来源记录严格绑定本次提交快照：仅比较 before -> submitted 且校验 revision + 全量逐项一致。
+          final provOut = await prov.applyCommitBoundDiff(
+            serverKey: session.serverKey,
+            rulesBeforeCommit: existingRules,
+            beforeRevision: filteringData.userRulesRevision,
+            rulesSubmitted: updatedRules,
+            rulesReadback: confirmedRules,
+            committedRevision: committedRev,
+            readbackRevision: readbackRev,
+            entryPoint: entryPoint,
+          );
+          if (provOut.interruptedByExternalUpdate) {
+            provenanceInterrupted = true;
+          } else if (provOut.legacyUnconfirmed) {
+            provenanceLegacyUnconfirmed = true;
+          } else if (provOut.storeSaveFailed) {
+            provenanceSaveFailed = true;
           }
 
           if (committedRev == null || committedRev.isEmpty) {
@@ -1241,8 +1265,12 @@ class ExceptionRuleCoordinator {
 
       String withUndoNotice(String baseMessage) {
         var msg = baseMessage;
-        if (provenanceSaveFailed) {
+        if (provenanceInterrupted) {
+          msg = '规则操作已提交，但来源确认被其他更新打断。$msg';
+        } else if (provenanceSaveFailed) {
           msg = '规则已添加，但来源记录保存失败。$msg';
+        } else if (provenanceLegacyUnconfirmed) {
+          msg = '旧核心未返回版本信息，来源关联降为待确认。$msg';
         }
         if (undoDisabledReason == null || undoDisabledReason.isEmpty) {
           return msg;
@@ -1313,6 +1341,8 @@ class ExceptionRuleCoordinator {
             stillBlockedByImportant: true,
             cacheFlushFailed: cacheFlushFailed,
             provenanceSaveFailed: provenanceSaveFailed,
+            provenanceInterrupted: provenanceInterrupted,
+            provenanceLegacyUnconfirmed: provenanceLegacyUnconfirmed,
             addedRule: addedRule,
             undoToken: undoToken,
             undoDisabledReason: undoDisabledReason,
@@ -1328,6 +1358,8 @@ class ExceptionRuleCoordinator {
           verifiedUnblocked: false,
           cacheFlushFailed: cacheFlushFailed,
           provenanceSaveFailed: provenanceSaveFailed,
+          provenanceInterrupted: provenanceInterrupted,
+          provenanceLegacyUnconfirmed: provenanceLegacyUnconfirmed,
           addedRule: addedRule,
           undoToken: undoToken,
           undoDisabledReason: undoDisabledReason,
@@ -1348,6 +1380,8 @@ class ExceptionRuleCoordinator {
           verificationIncomplete: false,
           cacheFlushFailed: cacheFlushFailed,
           provenanceSaveFailed: provenanceSaveFailed,
+          provenanceInterrupted: provenanceInterrupted,
+          provenanceLegacyUnconfirmed: provenanceLegacyUnconfirmed,
           addedRule: addedRule,
           undoToken: undoToken,
           undoDisabledReason: undoDisabledReason,
@@ -1370,6 +1404,8 @@ class ExceptionRuleCoordinator {
             verifiedUnblocked: true,
             cacheFlushFailed: true,
             provenanceSaveFailed: provenanceSaveFailed,
+            provenanceInterrupted: provenanceInterrupted,
+            provenanceLegacyUnconfirmed: provenanceLegacyUnconfirmed,
             addedRule: addedRule,
             undoToken: undoToken,
             undoDisabledReason: undoDisabledReason,
@@ -1385,6 +1421,8 @@ class ExceptionRuleCoordinator {
           verifiedUnblocked: true,
           cacheFlushFailed: false,
           provenanceSaveFailed: provenanceSaveFailed,
+          provenanceInterrupted: provenanceInterrupted,
+          provenanceLegacyUnconfirmed: provenanceLegacyUnconfirmed,
           addedRule: addedRule,
           undoToken: undoToken,
           undoDisabledReason: undoDisabledReason,
@@ -1405,6 +1443,8 @@ class ExceptionRuleCoordinator {
         verificationIncomplete: true,
         cacheFlushFailed: cacheFlushFailed,
         provenanceSaveFailed: provenanceSaveFailed,
+        provenanceInterrupted: provenanceInterrupted,
+        provenanceLegacyUnconfirmed: provenanceLegacyUnconfirmed,
         addedRule: addedRule,
         undoToken: undoToken,
         undoDisabledReason: undoDisabledReason,
@@ -1497,11 +1537,26 @@ class ExceptionRuleCoordinator {
       _lastTokensByRuleKey.remove(_tokenKey(session.serverKey, clean));
 
       final prov = provenanceService ?? ManualRuleProvenanceService.instance;
-      await prov.markRuleRemovedFromCore(
-        serverKey: session.serverKey,
-        ruleText: clean,
-        confirmedRevision: saveRes.userRulesRevisionHeader,
-      );
+      final afterUndo = await apiClient.getFiltering();
+      if (afterUndo.successful && afterUndo.content is Filtering) {
+        final confirmedAfter = afterUndo.content as Filtering;
+        await prov.applyCommitBoundDiff(
+          serverKey: session.serverKey,
+          rulesBeforeCommit: current,
+          beforeRevision: filteringData.userRulesRevision,
+          rulesSubmitted: updated,
+          rulesReadback: confirmedAfter.userRules,
+          committedRevision: saveRes.userRulesRevisionHeader,
+          readbackRevision: confirmedAfter.userRulesRevision,
+          entryPoint: '误杀排错-撤销',
+        );
+      } else {
+        await prov.markRuleRemovedFromCore(
+          serverKey: session.serverKey,
+          ruleText: clean,
+          confirmedRevision: saveRes.userRulesRevisionHeader,
+        );
+      }
 
       await apiClient.resetDnsCache();
       if (flushSystemDnsCache != null) {

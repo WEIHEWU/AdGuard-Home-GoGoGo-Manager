@@ -17,33 +17,42 @@ enum ManualRuleAction {
 
   String get storageValue => name;
 
-  static ManualRuleAction fromStorage(String? raw) {
-    switch (raw) {
+  static ManualRuleAction fromStorageStrict(dynamic raw) {
+    final s = raw?.toString().trim();
+    switch (s) {
       case 'allow':
         return ManualRuleAction.allow;
       case 'block':
         return ManualRuleAction.block;
-      default:
+      case 'other':
         return ManualRuleAction.other;
+      default:
+        throw FormatException('未知或非法的规则动作 action: $raw');
     }
   }
 }
 
-/// 手动规则记录来源。
+/// 手动规则历史记录来源。
 enum ManualRuleSource {
   manual,
   claimed;
 
   String get storageValue => name;
 
-  static ManualRuleSource fromStorage(String? raw) {
-    return raw == 'claimed'
-        ? ManualRuleSource.claimed
-        : ManualRuleSource.manual;
+  static ManualRuleSource fromStorageStrict(dynamic raw) {
+    final s = raw?.toString().trim();
+    switch (s) {
+      case 'manual':
+        return ManualRuleSource.manual;
+      case 'claimed':
+        return ManualRuleSource.claimed;
+      default:
+        throw FormatException('未知或非法的规则来源 source: $raw');
+    }
   }
 }
 
-/// 手动规则与 Core 实时自定义规则的同步状态。
+/// 手动规则与 Core 当前状态之间的关联确认级别。
 enum ManualRuleSyncStatus {
   present,
   missing,
@@ -52,8 +61,11 @@ enum ManualRuleSyncStatus {
 
   String get storageValue => name;
 
-  static ManualRuleSyncStatus fromStorage(String? raw) {
-    switch (raw) {
+  static ManualRuleSyncStatus fromStorageStrict(dynamic raw) {
+    final s = raw?.toString().trim();
+    switch (s) {
+      case 'present':
+        return ManualRuleSyncStatus.present;
       case 'missing':
         return ManualRuleSyncStatus.missing;
       case 'unconfirmed':
@@ -62,7 +74,7 @@ enum ManualRuleSyncStatus {
       case 'duplicate_ambiguous':
         return ManualRuleSyncStatus.duplicateAmbiguous;
       default:
-        return ManualRuleSyncStatus.present;
+        throw FormatException('未知或非法的关联状态 sync_status: $raw');
     }
   }
 }
@@ -224,6 +236,23 @@ class RuleListDiffResult {
     }
     return counts;
   }
+
+  /// 逐项对比两个规则列表的非空规范化行（严格有序一致，不允许在写后外部增删改后仍视为等于提交快照）。
+  static bool listsEqualExact(List<String> a, List<String> b) {
+    final normA = [
+      for (final raw in a)
+        if (raw.trim().isNotEmpty) raw.trim(),
+    ];
+    final normB = [
+      for (final raw in b)
+        if (raw.trim().isNotEmpty) raw.trim(),
+    ];
+    if (normA.length != normB.length) return false;
+    for (var i = 0; i < normA.length; i++) {
+      if (normA[i] != normB[i]) return false;
+    }
+    return true;
+  }
 }
 
 /// 持久化手动规则记录。
@@ -259,13 +288,12 @@ class ManualRuleRecord {
   RuleClassification get classification =>
       RuleClassification.classify(ruleText);
 
-  String get primaryLabel {
-    if (syncStatus == ManualRuleSyncStatus.duplicateAmbiguous) {
-      return '归属未确认';
-    }
-    if (syncStatus == ManualRuleSyncStatus.unconfirmed) {
-      return '来源未确认';
-    }
+  /// 历史来源分类（区分“手动新增”与“用户认领”，独立于当前版本关联状态）。
+  String get historicalOriginLabel =>
+      source == ManualRuleSource.claimed ? '用户认领' : '手动新增';
+
+  /// 历史操作对应的动作/类型标签。
+  String get historicalActionLabel {
     if (source == ManualRuleSource.claimed) {
       return '用户认领';
     }
@@ -277,6 +305,33 @@ class ManualRuleRecord {
       case ManualRuleAction.other:
         return '手动规则';
     }
+  }
+
+  /// 当前与 Core 实时的关联确认状态标签。
+  String get associationStatusLabel {
+    switch (syncStatus) {
+      case ManualRuleSyncStatus.present:
+        return '已确认';
+      case ManualRuleSyncStatus.missing:
+        return '已不存在';
+      case ManualRuleSyncStatus.unconfirmed:
+        return '待确认';
+      case ManualRuleSyncStatus.duplicateAmbiguous:
+        return '重复歧义';
+    }
+  }
+
+  String get primaryLabel {
+    if (syncStatus == ManualRuleSyncStatus.duplicateAmbiguous) {
+      return '归属未确认';
+    }
+    if (syncStatus == ManualRuleSyncStatus.unconfirmed) {
+      return '来源待确认';
+    }
+    if (syncStatus == ManualRuleSyncStatus.missing) {
+      return '已不存在';
+    }
+    return historicalActionLabel;
   }
 
   DateTime get sortTimestamp => createdAt ?? claimedAt ?? updatedAt;
@@ -342,13 +397,12 @@ class ManualRuleRecord {
       throw const FormatException('记录缺少必要标识或规则原文');
     }
 
-    final actionRaw = json['action']?.toString();
-    final classification = RuleClassification.classify(ruleText);
+    final actionRaw = json['action'];
     final action = actionRaw != null
-        ? ManualRuleAction.fromStorage(actionRaw)
-        : classification.action;
+        ? ManualRuleAction.fromStorageStrict(actionRaw)
+        : RuleClassification.classify(ruleText).action;
 
-    final source = ManualRuleSource.fromStorage(json['source']?.toString());
+    final source = ManualRuleSource.fromStorageStrict(json['source']);
     final entryPoint = (json['entry_point'] ?? '未知入口').toString().trim();
 
     DateTime? parseOptDate(dynamic raw) {
@@ -385,10 +439,28 @@ class ManualRuleRecord {
       note: (noteRaw == null || noteRaw.isEmpty) ? null : noteRaw,
       confirmedRevision:
           (revRaw == null || revRaw.trim().isEmpty) ? null : revRaw.trim(),
-      syncStatus:
-          ManualRuleSyncStatus.fromStorage(json['sync_status']?.toString()),
+      syncStatus: ManualRuleSyncStatus.fromStorageStrict(json['sync_status']),
     );
   }
+}
+
+/// 提交绑定式来源更新结果：严格区分确认成功、外部更新打断与旧核心降级。
+class CommitProvenanceOutcome {
+  final bool interruptedByExternalUpdate;
+  final bool legacyUnconfirmed;
+  final bool storeSaveFailed;
+  final int addedCount;
+  final int removedCount;
+  final String? message;
+
+  const CommitProvenanceOutcome({
+    this.interruptedByExternalUpdate = false,
+    this.legacyUnconfirmed = false,
+    this.storeSaveFailed = false,
+    this.addedCount = 0,
+    this.removedCount = 0,
+    this.message,
+  });
 }
 
 /// UI 统一来源徽章展示模型。
@@ -745,7 +817,16 @@ class ManualRuleProvenanceService extends ChangeNotifier {
 
   bool hasActiveManualRecord(String serverKey, String rawRule) {
     final matches = findRecordsForRule(serverKey, rawRule);
-    return matches.any((r) => r.syncStatus != ManualRuleSyncStatus.missing);
+    return matches.any((r) => r.syncStatus == ManualRuleSyncStatus.present);
+  }
+
+  bool hasUnconfirmedOrDupRecord(String serverKey, String rawRule) {
+    final matches = findRecordsForRule(serverKey, rawRule);
+    return matches.any(
+      (r) =>
+          r.syncStatus == ManualRuleSyncStatus.unconfirmed ||
+          r.syncStatus == ManualRuleSyncStatus.duplicateAmbiguous,
+    );
   }
 
   /// 按规则显示要求解析单个“自定义规则列表行”的来源标签（filter_list_id == 0）。
@@ -774,10 +855,13 @@ class ManualRuleProvenanceService extends ChangeNotifier {
         .toList();
 
     if (duplicateCountInCore > 1) {
+      final singleRec = active.length == 1 ? active.first : null;
       return RuleSourceDisplay(
         label: '归属未确认',
-        secondaryHint: 'Core 中存在 $duplicateCountInCore 条相同规则，无法安全区分单条归属',
-        record: active.length == 1 ? active.first : null,
+        secondaryHint: singleRec != null
+            ? '重复歧义（Core 共 $duplicateCountInCore 条相同行）· 历史来源：${singleRec.historicalActionLabel}'
+            : 'Core 中存在 $duplicateCountInCore 条相同规则，无法安全区分单条归属',
+        record: singleRec,
         isUnconfirmedOrAmbiguous: true,
         isDuplicateAmbiguous: true,
       );
@@ -786,10 +870,11 @@ class ManualRuleProvenanceService extends ChangeNotifier {
     if (active.isEmpty) {
       // 如果存在被标记 missing 的旧记录且规则如今又在 Core 中出现（例如外部删后重建）
       if (matches.any((r) => r.syncStatus == ManualRuleSyncStatus.missing)) {
+        final hist = matches.last;
         return RuleSourceDisplay(
-          label: '来源未确认',
-          secondaryHint: '历史记录曾显示该规则消失，后又在 Core 中重新出现',
-          record: matches.last,
+          label: '来源待确认',
+          secondaryHint: '历史来源：${hist.historicalActionLabel}（曾消失后又出现，待确认）',
+          record: hist,
           isUnconfirmedOrAmbiguous: true,
         );
       }
@@ -812,7 +897,7 @@ class ManualRuleProvenanceService extends ChangeNotifier {
     if (rec.syncStatus == ManualRuleSyncStatus.duplicateAmbiguous) {
       return RuleSourceDisplay(
         label: '归属未确认',
-        secondaryHint: '存在重复规则文本，无法安全认定归属',
+        secondaryHint: '重复歧义 · 历史来源：${rec.historicalActionLabel}',
         record: rec,
         isUnconfirmedOrAmbiguous: true,
         isDuplicateAmbiguous: true,
@@ -820,8 +905,8 @@ class ManualRuleProvenanceService extends ChangeNotifier {
     }
     if (rec.syncStatus == ManualRuleSyncStatus.unconfirmed) {
       return RuleSourceDisplay(
-        label: '来源未确认',
-        secondaryHint: '外部变更后重新出现或未完成确认',
+        label: '来源待确认',
+        secondaryHint: '历史来源：${rec.historicalActionLabel}（未绑定当前版本，待确认）',
         record: rec,
         isUnconfirmedOrAmbiguous: true,
       );
@@ -847,15 +932,19 @@ class ManualRuleProvenanceService extends ChangeNotifier {
     int duplicateCountInCore = 1,
   }) {
     if (filterListId != 0) {
-      final hasCoexistingManual = serverKey != null &&
-          serverKey.isNotEmpty &&
-          !_corruptedOrReadError &&
-          hasActiveManualRecord(serverKey, ruleText);
+      String? hint;
+      if (serverKey != null && serverKey.isNotEmpty && !_corruptedOrReadError) {
+        if (hasActiveManualRecord(serverKey, ruleText)) {
+          hint = '同时存在相同手动规则';
+        } else if (hasUnconfirmedOrDupRecord(serverKey, ruleText)) {
+          hint = '同时存在待确认手动记录';
+        }
+      }
       return RuleSourceDisplay(
         label: subscriptionDisplayName.trim().isNotEmpty
             ? subscriptionDisplayName.trim()
             : '订阅 #$filterListId',
-        secondaryHint: hasCoexistingManual ? '同时存在相同手动规则' : null,
+        secondaryHint: hint,
         isSubscriptionOrigin: true,
       );
     }
@@ -927,63 +1016,159 @@ class ManualRuleProvenanceService extends ChangeNotifier {
     });
   }
 
-  /// 应用“批量编辑 / 日志改写 / 自定义列表变更”的多重集合差异：
-  /// - 仅对 genuinely 新增（净增加）的规则新建手动记录；
-  /// - 仅对被移除（不再存在于 Core）的已管理记录标为 `missing`；
-  /// - 保持未改动规则原有来源不变（从未记录的仍然来源未记录）。
-  Future<bool> applyRuleListMutationDiff({
+  /// 严格绑定提交版本的差异写入协议：
+  /// 1) 先用 (rulesBeforeCommit, beforeRevision) 检查本地既有记录是否已发生未观测外部偏移（如外部增删改/核心重启）；
+  /// 2) 仅比对 `rulesBeforeCommit -> rulesSubmitted`（严禁用任意回读列表计算新增）；
+  /// 3) 仅当回读 revision == committedRevision 且回读完整列表逐项等于 rulesSubmitted 时，
+  ///    才确认本次新增并顺延既有关联链；若期间被打断则不记录本次与外部规则并提示被打断；
+  ///    若旧核心未返回版本信息且列表一致，则明确降级为 `unconfirmed`（待确认）。
+  Future<CommitProvenanceOutcome> applyCommitBoundDiff({
     required String serverKey,
-    required List<String> rulesBefore,
-    required List<String> rulesAfter,
+    required List<String> rulesBeforeCommit,
+    required String? beforeRevision,
+    required List<String> rulesSubmitted,
+    required List<String> rulesReadback,
+    required String? committedRevision,
+    required String? readbackRevision,
     required String entryPoint,
-    String? confirmedRevision,
   }) async {
     await ensureLoaded();
     return _runSerialized(() async {
-      if (_corruptedOrReadError) return false;
-      final diff = RuleListDiffResult.diff(rulesBefore, rulesAfter);
-      final afterCounts = RuleListDiffResult.countExactRules(rulesAfter);
+      if (_corruptedOrReadError) {
+        return const CommitProvenanceOutcome(
+          storeSaveFailed: true,
+          message: '规则已添加，但来源记录保存失败。',
+        );
+      }
+
       final now = _nowProvider().toUtc();
       final bucket = _recordsByServer.putIfAbsent(serverKey, () => []);
       var changed = false;
 
-      // 1) 已被本次操作彻底从 Core 列表移除的原记录标为 missing
+      // 先以提交前快照同步既有记录：任何在提交前就已被外部变更/核心重启打断的记录必须先降为待确认/缺失/重复歧义
+      if (_syncBucketUnlocked(
+        bucket: bucket,
+        coreRules: rulesBeforeCommit,
+        currentRevision: beforeRevision,
+        now: now,
+      )) {
+        changed = true;
+      }
+
+      final cleanCommittedRev = committedRevision?.trim();
+      final cleanReadbackRev = readbackRevision?.trim();
+      final hasCommittedRev =
+          cleanCommittedRev != null && cleanCommittedRev.isNotEmpty;
+      final hasReadbackRev =
+          cleanReadbackRev != null && cleanReadbackRev.isNotEmpty;
+      final listsMatchExact =
+          RuleListDiffResult.listsEqualExact(rulesReadback, rulesSubmitted);
+
+      // 判定是否为提交期间被其他客户端并发修改打断（revision 不一致或回读列表不等于实际提交列表）
+      final bool isLegacyBothEmpty = !hasCommittedRev && !hasReadbackRev;
+      final bool isInterrupted = !listsMatchExact ||
+          (!isLegacyBothEmpty &&
+              (!hasCommittedRev ||
+                  !hasReadbackRev ||
+                  cleanReadbackRev != cleanCommittedRev));
+
+      if (isInterrupted) {
+        // 用真实回读状态再同步现有记录（断链退化为待确认），绝不伪造本次或外部规则的手动来源！
+        if (_syncBucketUnlocked(
+          bucket: bucket,
+          coreRules: rulesReadback,
+          currentRevision: cleanReadbackRev,
+          now: now,
+        )) {
+          changed = true;
+        }
+        final saved = changed ? await _persistUnlocked() : true;
+        if (changed) notifyListeners();
+        return CommitProvenanceOutcome(
+          interruptedByExternalUpdate: true,
+          storeSaveFailed: !saved,
+          message: '规则操作已提交，但来源确认被其他更新打断',
+        );
+      }
+
+      // 差异只能严格来自：本次提交前列表 -> 本次实际提交列表
+      final diff = RuleListDiffResult.diff(rulesBeforeCommit, rulesSubmitted);
+      final submittedCounts = RuleListDiffResult.countExactRules(rulesSubmitted);
+      final beforeCounts = RuleListDiffResult.countExactRules(rulesBeforeCommit);
+      final targetAddedStatus = isLegacyBothEmpty
+          ? ManualRuleSyncStatus.unconfirmed
+          : ManualRuleSyncStatus.present;
+      final String? revToBind = isLegacyBothEmpty ? null : cleanCommittedRev;
+
+      // 1) 更新本次提交保留 / 移除的既有记录
       for (var i = 0; i < bucket.length; i++) {
         final rec = bucket[i];
-        final remaining = afterCounts[rec.ruleText] ?? 0;
-        if (remaining == 0 && rec.syncStatus != ManualRuleSyncStatus.missing) {
-          bucket[i] = rec.copyWith(
-            syncStatus: ManualRuleSyncStatus.missing,
-            updatedAt: now,
-          );
-          changed = true;
-        } else if (remaining > 1 &&
-            rec.syncStatus != ManualRuleSyncStatus.duplicateAmbiguous) {
-          bucket[i] = rec.copyWith(
-            syncStatus: ManualRuleSyncStatus.duplicateAmbiguous,
-            updatedAt: now,
-          );
-          changed = true;
+        final remaining = submittedCounts[rec.ruleText] ?? 0;
+        if (remaining == 0) {
+          if (rec.syncStatus != ManualRuleSyncStatus.missing ||
+              rec.confirmedRevision != null) {
+            bucket[i] = rec.copyWith(
+              syncStatus: ManualRuleSyncStatus.missing,
+              clearConfirmedRevision: true,
+              updatedAt: now,
+            );
+            changed = true;
+          }
+        } else if (remaining > 1) {
+          if (rec.syncStatus != ManualRuleSyncStatus.duplicateAmbiguous ||
+              rec.confirmedRevision != null) {
+            bucket[i] = rec.copyWith(
+              syncStatus: ManualRuleSyncStatus.duplicateAmbiguous,
+              clearConfirmedRevision: true,
+              updatedAt: now,
+            );
+            changed = true;
+          }
+        } else {
+          // remaining == 1：仅本客户端在未断裂版本链上持有 present 的记录才能安全顺延版本，
+          // 既有的 unconfirmed / missing 记录绝不借本次新增顺便“洗白”成已确认！
+          if (rec.syncStatus == ManualRuleSyncStatus.present &&
+              revToBind != null) {
+            if (rec.confirmedRevision != revToBind) {
+              bucket[i] = rec.copyWith(
+                confirmedRevision: revToBind,
+                updatedAt: now,
+              );
+              changed = true;
+            }
+          } else if (isLegacyBothEmpty &&
+              rec.syncStatus == ManualRuleSyncStatus.present) {
+            bucket[i] = rec.copyWith(
+              syncStatus: ManualRuleSyncStatus.unconfirmed,
+              clearConfirmedRevision: true,
+              updatedAt: now,
+            );
+            changed = true;
+          }
         }
       }
 
-      // 2) 为净新增规则创建记录（如果 Core 中已经出现重复相同行，标为 duplicateAmbiguous）
+      // 2) 为净新增规则创建记录
       for (final entry in diff.addedCounts.entries) {
         final rule = entry.key;
-        final totalNow = afterCounts[rule] ?? entry.value;
-        final beforeCount =
-            RuleListDiffResult.countExactRules(rulesBefore)[rule] ?? 0;
-        if (beforeCount > 0 && totalNow > 1) {
-          // 在已有相同行基础上又加了一行，形成重复规则歧义
-          final idx = bucket.indexWhere((r) => r.ruleText == rule);
+        final totalNow = submittedCounts[rule] ?? entry.value;
+        final prevCount = beforeCounts[rule] ?? 0;
+        final isDup = totalNow > 1;
+        final nextStatus = isDup
+            ? ManualRuleSyncStatus.duplicateAmbiguous
+            : targetAddedStatus;
+
+        final cls = RuleClassification.classify(rule);
+        final idx = bucket.indexWhere((r) => r.ruleText == rule);
+
+        if (prevCount > 0 && isDup) {
           if (idx >= 0) {
             bucket[idx] = bucket[idx].copyWith(
               syncStatus: ManualRuleSyncStatus.duplicateAmbiguous,
+              clearConfirmedRevision: true,
               updatedAt: now,
-              confirmedRevision: confirmedRevision ?? bucket[idx].confirmedRevision,
             );
           } else {
-            final cls = RuleClassification.classify(rule);
             bucket.add(ManualRuleRecord(
               recordId: _nextRecordId(),
               serverKey: serverKey,
@@ -995,7 +1180,7 @@ class ManualRuleProvenanceService extends ChangeNotifier {
               claimedAt: null,
               updatedAt: now,
               note: null,
-              confirmedRevision: confirmedRevision,
+              confirmedRevision: null,
               syncStatus: ManualRuleSyncStatus.duplicateAmbiguous,
             ));
           }
@@ -1003,11 +1188,6 @@ class ManualRuleProvenanceService extends ChangeNotifier {
           continue;
         }
 
-        final cls = RuleClassification.classify(rule);
-        final status = totalNow > 1
-            ? ManualRuleSyncStatus.duplicateAmbiguous
-            : ManualRuleSyncStatus.present;
-        final idx = bucket.indexWhere((r) => r.ruleText == rule);
         final rec = ManualRuleRecord(
           recordId: idx >= 0 ? bucket[idx].recordId : _nextRecordId(),
           serverKey: serverKey,
@@ -1019,9 +1199,8 @@ class ManualRuleProvenanceService extends ChangeNotifier {
           claimedAt: null,
           updatedAt: now,
           note: idx >= 0 ? bucket[idx].note : null,
-          confirmedRevision: confirmedRevision ??
-              (idx >= 0 ? bucket[idx].confirmedRevision : null),
-          syncStatus: status,
+          confirmedRevision: isDup ? null : revToBind,
+          syncStatus: nextStatus,
         );
         if (idx >= 0) {
           bucket[idx] = rec;
@@ -1031,10 +1210,22 @@ class ManualRuleProvenanceService extends ChangeNotifier {
         changed = true;
       }
 
-      if (!changed) return true;
-      final saved = await _persistUnlocked();
-      notifyListeners();
-      return saved;
+      final saved = changed ? await _persistUnlocked() : true;
+      if (changed) notifyListeners();
+
+      final addedTotal = diff.addedCounts.values.fold(0, (a, b) => a + b);
+      final removedTotal = diff.removedCounts.values.fold(0, (a, b) => a + b);
+      return CommitProvenanceOutcome(
+        legacyUnconfirmed: isLegacyBothEmpty,
+        storeSaveFailed: !saved,
+        addedCount: addedTotal,
+        removedCount: removedTotal,
+        message: !saved
+            ? '规则已添加，但来源记录保存失败。'
+            : (isLegacyBothEmpty
+                ? '规则操作已提交，旧核心未返回版本信息，来源关联降为待确认'
+                : null),
+      );
     });
   }
 
@@ -1058,8 +1249,8 @@ class ManualRuleProvenanceService extends ChangeNotifier {
             bucket[i].syncStatus != ManualRuleSyncStatus.missing) {
           bucket[i] = bucket[i].copyWith(
             syncStatus: ManualRuleSyncStatus.missing,
+            clearConfirmedRevision: true,
             updatedAt: now,
-            confirmedRevision: confirmedRevision ?? bucket[i].confirmedRevision,
           );
           changed = true;
         }
@@ -1071,11 +1262,63 @@ class ManualRuleProvenanceService extends ChangeNotifier {
     });
   }
 
-  /// 使用从 Core `/filtering/status` 读取到的最新规则快照同步当前服务器的管理状态。
-  /// 严禁把外部或已有未管理规则自动改成手动来源；仅同步既有记录的在位/缺失/重复/外部重建未确认状态。
+  bool _syncBucketUnlocked({
+    required List<ManualRuleRecord> bucket,
+    required List<String> coreRules,
+    required String? currentRevision,
+    required DateTime now,
+  }) {
+    final counts = RuleListDiffResult.countExactRules(coreRules);
+    final rev = currentRevision?.trim();
+    final hasRev = rev != null && rev.isNotEmpty;
+    var changed = false;
+
+    for (var i = 0; i < bucket.length; i++) {
+      final rec = bucket[i];
+      final c = counts[rec.ruleText] ?? 0;
+      ManualRuleSyncStatus nextStatus;
+      var clearRev = false;
+
+      if (c == 0) {
+        nextStatus = ManualRuleSyncStatus.missing;
+        clearRev = rec.confirmedRevision != null;
+      } else if (c > 1) {
+        nextStatus = ManualRuleSyncStatus.duplicateAmbiguous;
+        clearRev = rec.confirmedRevision != null;
+      } else {
+        // c == 1：仅当同一可信版本且此前本就是已确认状态时才维持已确认；
+        // 任何未观测版本变化、核心重启、外部删除再重加、或曾经缺失/歧义/导入记录一律保留历史并降为待确认。
+        final bool sameTrustedRevision =
+            rec.syncStatus == ManualRuleSyncStatus.present &&
+                hasRev &&
+                rec.confirmedRevision != null &&
+                rec.confirmedRevision == rev;
+        if (sameTrustedRevision) {
+          nextStatus = ManualRuleSyncStatus.present;
+        } else {
+          nextStatus = ManualRuleSyncStatus.unconfirmed;
+          clearRev = rec.confirmedRevision != null;
+        }
+      }
+
+      if (nextStatus != rec.syncStatus || clearRev) {
+        bucket[i] = rec.copyWith(
+          syncStatus: nextStatus,
+          clearConfirmedRevision: clearRev,
+          updatedAt: now,
+        );
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /// 使用从 Core `/filtering/status` 读取到的最新规则快照与版本号同步当前服务器的管理关联状态。
+  /// 保留“历史来源”（created_at / entry_point / source / note），绝不自动恢复外部变动或重启后的“已确认”状态。
   Future<void> syncWithCoreRules({
     required String serverKey,
     required List<String> coreRules,
+    String? currentRevision,
   }) async {
     await ensureLoaded();
     await _runSerialized(() async {
@@ -1083,40 +1326,12 @@ class ManualRuleProvenanceService extends ChangeNotifier {
       final bucket = _recordsByServer[serverKey];
       if (bucket == null || bucket.isEmpty) return;
 
-      final counts = RuleListDiffResult.countExactRules(coreRules);
-      final now = _nowProvider().toUtc();
-      var changed = false;
-
-      for (var i = 0; i < bucket.length; i++) {
-        final rec = bucket[i];
-        final c = counts[rec.ruleText] ?? 0;
-        ManualRuleSyncStatus nextStatus = rec.syncStatus;
-
-        if (c == 0) {
-          if (rec.syncStatus != ManualRuleSyncStatus.missing) {
-            nextStatus = ManualRuleSyncStatus.missing;
-          }
-        } else if (c > 1) {
-          if (rec.syncStatus != ManualRuleSyncStatus.duplicateAmbiguous) {
-            nextStatus = ManualRuleSyncStatus.duplicateAmbiguous;
-          }
-        } else {
-          // c == 1
-          if (rec.syncStatus == ManualRuleSyncStatus.missing ||
-              rec.syncStatus == ManualRuleSyncStatus.duplicateAmbiguous) {
-            // 规则此前已缺失或处于重复歧义，之后在 Core 中以单条形态重新出现：无法确认外部变更后归属，标为未确认。
-            nextStatus = ManualRuleSyncStatus.unconfirmed;
-          }
-        }
-
-        if (nextStatus != rec.syncStatus) {
-          bucket[i] = rec.copyWith(
-            syncStatus: nextStatus,
-            updatedAt: now,
-          );
-          changed = true;
-        }
-      }
+      final changed = _syncBucketUnlocked(
+        bucket: bucket,
+        coreRules: coreRules,
+        currentRevision: currentRevision,
+        now: _nowProvider().toUtc(),
+      );
 
       if (changed) {
         await _persistUnlocked();
@@ -1125,8 +1340,8 @@ class ManualRuleProvenanceService extends ChangeNotifier {
     });
   }
 
-  /// 用户主动将已有规则（例如升级前手动添加或外部添加规则）纳入“用户认领”管理：
-  /// 严格置 `source = claimed`、`createdAt = null`、`claimedAt = now`，不伪造原始添加时间。
+  /// 用户主动将已有或待确认规则纳入“用户认领”管理：
+  /// 严格置 `source = claimed`、`createdAt = null`、`claimedAt = now`，并绑定本次读取的 `confirmedRevision`（无版本则降为待确认）。
   Future<bool> claimExistingRule({
     required String serverKey,
     required String ruleText,
@@ -1145,12 +1360,23 @@ class ManualRuleProvenanceService extends ChangeNotifier {
       final occurrences = counts[clean] ?? 0;
       if (occurrences == 0) return false;
 
+      final cleanRev = confirmedRevision?.trim();
+      final hasRev = cleanRev != null && cleanRev.isNotEmpty;
       final now = _nowProvider().toUtc();
       final bucket = _recordsByServer.putIfAbsent(serverKey, () => []);
       final cls = RuleClassification.classify(clean);
-      final status = occurrences > 1
-          ? ManualRuleSyncStatus.duplicateAmbiguous
-          : ManualRuleSyncStatus.present;
+      final ManualRuleSyncStatus status;
+      final String? boundRev;
+      if (occurrences > 1) {
+        status = ManualRuleSyncStatus.duplicateAmbiguous;
+        boundRev = null;
+      } else if (hasRev) {
+        status = ManualRuleSyncStatus.present;
+        boundRev = cleanRev;
+      } else {
+        status = ManualRuleSyncStatus.unconfirmed;
+        boundRev = null;
+      }
 
       final idx = bucket.indexWhere((r) => r.ruleText == clean);
       final next = ManualRuleRecord(
@@ -1166,8 +1392,7 @@ class ManualRuleProvenanceService extends ChangeNotifier {
         note: (note != null && note.trim().isNotEmpty)
             ? note.trim()
             : (idx >= 0 ? bucket[idx].note : null),
-        confirmedRevision: confirmedRevision ??
-            (idx >= 0 ? bucket[idx].confirmedRevision : null),
+        confirmedRevision: boundRev,
         syncStatus: status,
       );
       if (idx >= 0) {
@@ -1288,10 +1513,16 @@ class ManualRuleProvenanceService extends ChangeNotifier {
     return outFile;
   }
 
-  /// 导入并严格校验 schema v1 备份 JSON（仅更新本地管理记录，绝不自动向 Core 提交或改写任何过滤规则）。
+  /// 导入并严格校验 schema v1 备份 JSON（仅更新本地管理记录，绝不自动向 Core 提交或改写任何过滤规则）：
+  /// - 保留历史来源（manual/claimed）、历史时间（created_at/claimed_at）、入口与备注；
+  /// - 绝不允许导入文件声称的 `present` 或旧 `confirmed_revision` 直接变为当前已确认：
+  ///   新导入记录或映射到其他服务器的记录默认 `unconfirmed`（待确认），且若当前 Core 中不存在该规则则记为 `missing`（已不存在），绝不自动创建 Core 规则；
+  /// - 本地已有可信 `present` 记录时，不允许导入的未确认记录覆盖或降级它；
+  /// - 严格校验 `action` / `source` / `sync_status` 枚举，未知枚举直接抛出 FormatException。
   Future<ProvenanceImportResult> importBackupJson(
     String rawJson, {
     String? importIntoServerKey,
+    List<String>? currentCoreRulesForTargetServer,
     bool overwriteStorageIfCorrupted = false,
   }) async {
     await ensureLoaded();
@@ -1343,6 +1574,25 @@ class ManualRuleProvenanceService extends ChangeNotifier {
         _storageErrorDetail = null;
       }
 
+      final Map<String, int>? coreCounts =
+          currentCoreRulesForTargetServer != null
+              ? RuleListDiffResult.countExactRules(
+                  currentCoreRulesForTargetServer,
+                )
+              : null;
+
+      ManualRuleSyncStatus resolveImportedStatus(ManualRuleRecord incoming) {
+        if (coreCounts != null) {
+          final c = coreCounts[incoming.ruleText] ?? 0;
+          if (c == 0) return ManualRuleSyncStatus.missing;
+          if (c > 1) return ManualRuleSyncStatus.duplicateAmbiguous;
+          return ManualRuleSyncStatus.unconfirmed;
+        }
+        return incoming.syncStatus == ManualRuleSyncStatus.missing
+            ? ManualRuleSyncStatus.missing
+            : ManualRuleSyncStatus.unconfirmed;
+      }
+
       var importedCount = 0;
       var updatedCount = 0;
       var skippedCount = 0;
@@ -1351,19 +1601,31 @@ class ManualRuleProvenanceService extends ChangeNotifier {
       for (final entry in parsedByServer.entries) {
         final bucket = _recordsByServer.putIfAbsent(entry.key, () => []);
         for (final incoming in entry.value) {
+          final safeIncoming = incoming.copyWith(
+            syncStatus: resolveImportedStatus(incoming),
+            clearConfirmedRevision: true,
+            updatedAt: now,
+          );
           final existingIdx =
-              bucket.indexWhere((r) => r.ruleText == incoming.ruleText);
+              bucket.indexWhere((r) => r.ruleText == safeIncoming.ruleText);
           if (existingIdx < 0) {
-            // 新导入记录等待与 Core 实际规则核对前先以 unconfirmed 还是保留 present？
-            // 若能与 Core 同步则会立刻校正；先保留备份记录但更新 updatedAt
-            bucket.add(incoming.copyWith(updatedAt: now));
+            bucket.add(safeIncoming);
             importedCount += 1;
           } else {
             final existing = bucket[existingIdx];
+            // 本地已有可信已确认记录时，绝不被导入的未确认记录覆盖、篡改或降级
+            if (existing.syncStatus == ManualRuleSyncStatus.present) {
+              skippedCount += 1;
+              continue;
+            }
             if (incoming.updatedAt.isAfter(existing.updatedAt) ||
-                (existing.note == null && incoming.note != null)) {
-              bucket[existingIdx] = incoming.copyWith(
+                (existing.note == null && safeIncoming.note != null)) {
+              bucket[existingIdx] = safeIncoming.copyWith(
                 recordId: existing.recordId,
+                note: (safeIncoming.note != null &&
+                        safeIncoming.note!.isNotEmpty)
+                    ? safeIncoming.note
+                    : existing.note,
                 updatedAt: now,
               );
               updatedCount += 1;

@@ -1276,7 +1276,9 @@ class _FalsePositiveAssistantModalState
       label: outcome.message,
       color: outcome.verifiedUnblocked &&
               !outcome.cacheFlushFailed &&
-              !outcome.provenanceSaveFailed
+              !outcome.provenanceSaveFailed &&
+              !outcome.provenanceInterrupted &&
+              !outcome.provenanceLegacyUnconfirmed
           ? Colors.green
           : (outcome.writeSucceeded ? Colors.orange : Colors.red),
     );

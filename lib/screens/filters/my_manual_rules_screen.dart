@@ -109,11 +109,12 @@ class _MyManualRulesScreenState extends State<MyManualRulesScreen> {
     setState(() => _syncingCore = true);
     try {
       await filteringProvider.fetchFilters(showLoading: false);
-      final latestRules = filteringProvider.filtering?.userRules;
-      if (latestRules != null) {
+      final latestFiltering = filteringProvider.filtering;
+      if (latestFiltering != null) {
         await _provenanceService.syncWithCoreRules(
           serverKey: ServerRuleWriteQueue.serverKeyFor(server),
-          coreRules: latestRules,
+          coreRules: latestFiltering.userRules,
+          currentRevision: latestFiltering.userRulesRevision,
         );
       }
     } finally {
@@ -709,10 +710,14 @@ class _MyManualRulesScreenState extends State<MyManualRulesScreen> {
     if (payload == null || !mounted) return;
 
     final (rawJson, mapToCurrent) = payload;
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
     try {
       final res = await _provenanceService.importBackupJson(
         rawJson,
         importIntoServerKey: mapToCurrent ? serverKey : null,
+        currentCoreRulesForTargetServer:
+            mapToCurrent ? filteringProvider.filtering?.userRules : null,
         overwriteStorageIfCorrupted: _provenanceService.hasStorageError,
       );
       await _refreshAndSyncWithCore();
@@ -720,7 +725,7 @@ class _MyManualRulesScreenState extends State<MyManualRulesScreen> {
       showSnackbar(
         appConfigProvider: appConfigProvider,
         label:
-            '导入成功：新增 ${res.importedCount} 条，更新 ${res.updatedCount} 条（未改动 Core 规则）',
+            '导入成功：新增 ${res.importedCount} 条，更新 ${res.updatedCount} 条（默认待确认，未改动 Core 规则）',
         color: Colors.green,
       );
     } catch (e) {
@@ -947,12 +952,64 @@ class _MyManualRulesScreenState extends State<MyManualRulesScreen> {
     );
   }
 
+  Future<void> _claimUnconfirmedRecordDialog(ManualRuleRecord rec) async {
+    final filteringProvider =
+        Provider.of<FilteringProvider>(context, listen: false);
+    final appConfigProvider =
+        Provider.of<AppConfigProvider>(context, listen: false);
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('主动认领以建立当前管理关联？'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '当前记录仅保留历史信息（可能由外部变更、核心重启或备份导入引入）。主动认领后将标为“用户认领”并记录当前认领时间，仅建立当前管理关联，不会修改 Core 过滤规则。',
+            ),
+            const SizedBox(height: 10),
+            Text(
+              rec.ruleText,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确认认领'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    await filteringProvider.fetchFilters(showLoading: false);
+    if (!mounted) return;
+    final ok = await filteringProvider.claimExistingCustomRule(
+      rec.ruleText,
+      note: rec.note,
+    );
+    if (!mounted) return;
+    showSnackbar(
+      appConfigProvider: appConfigProvider,
+      label: ok ? '已建立新的“用户认领”管理关联' : '认领失败：Core 中未找到唯一匹配规则',
+      color: ok ? Colors.green : Colors.red,
+    );
+  }
+
   Widget _buildRecordCard(BuildContext context, ManualRuleRecord rec) {
     final cs = Theme.of(context).colorScheme;
     final cls = rec.classification;
     final display = RuleSourceDisplay(
       label: rec.primaryLabel,
-      secondaryHint: _syncSecondaryHint(rec.syncStatus),
+      secondaryHint: _syncSecondaryHint(rec),
       record: rec,
       isManualOrigin: rec.source == ManualRuleSource.manual,
       isClaimedOrigin: rec.source == ManualRuleSource.claimed,
@@ -991,6 +1048,15 @@ class _MyManualRulesScreenState extends State<MyManualRulesScreen> {
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '历史来源：${rec.historicalOriginLabel}（${rec.historicalActionLabel}） · 当前关联：${rec.associationStatusLabel}',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: cs.onSurfaceVariant,
+              ),
             ),
             const SizedBox(height: 8),
             SelectableText(
@@ -1059,6 +1125,12 @@ class _MyManualRulesScreenState extends State<MyManualRulesScreen> {
               spacing: 8,
               runSpacing: 6,
               children: [
+                if (rec.syncStatus == ManualRuleSyncStatus.unconfirmed)
+                  FilledButton.tonalIcon(
+                    onPressed: () => _claimUnconfirmedRecordDialog(rec),
+                    icon: const Icon(Icons.bookmark_added_outlined, size: 16),
+                    label: const Text('主动认领'),
+                  ),
                 OutlinedButton.icon(
                   onPressed: live?.kind == _LiveEffectivenessKind.checking
                       ? null
@@ -1090,16 +1162,16 @@ class _MyManualRulesScreenState extends State<MyManualRulesScreen> {
     );
   }
 
-  String? _syncSecondaryHint(ManualRuleSyncStatus syncStatus) {
-    switch (syncStatus) {
+  String? _syncSecondaryHint(ManualRuleRecord rec) {
+    switch (rec.syncStatus) {
       case ManualRuleSyncStatus.present:
         return null;
       case ManualRuleSyncStatus.missing:
-        return '规则已不在 Core 中';
+        return '历史来源：${rec.historicalActionLabel} · 已不在 Core 中';
       case ManualRuleSyncStatus.unconfirmed:
-        return '曾消失后外部重新出现';
+        return '历史来源：${rec.historicalActionLabel} · 外部变更或重启后待确认';
       case ManualRuleSyncStatus.duplicateAmbiguous:
-        return 'Core 存在重复相同行';
+        return '历史来源：${rec.historicalActionLabel} · Core 存在重复相同行';
     }
   }
 

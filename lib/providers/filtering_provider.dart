@@ -18,6 +18,8 @@ class RuleMutationResult {
   final bool ok;
   final bool conflictDetected;
   final bool provenanceSaveFailed;
+  final bool provenanceInterrupted;
+  final bool provenanceLegacyUnconfirmed;
   final bool duplicateAmbiguous;
   final bool readbackFailed;
   final int addedCount;
@@ -28,6 +30,8 @@ class RuleMutationResult {
     required this.ok,
     this.conflictDetected = false,
     this.provenanceSaveFailed = false,
+    this.provenanceInterrupted = false,
+    this.provenanceLegacyUnconfirmed = false,
     this.duplicateAmbiguous = false,
     this.readbackFailed = false,
     this.addedCount = 0,
@@ -94,10 +98,15 @@ class FilteringProvider with ChangeNotifier {
     }
   }
 
-  Future<void> _syncProvenanceWith(Server server, List<String> coreRules) async {
+  Future<void> _syncProvenanceWith(
+    Server server,
+    List<String> coreRules, [
+    String? currentRevision,
+  ]) async {
     await _provenanceService.syncWithCoreRules(
       serverKey: ServerRuleWriteQueue.serverKeyFor(server),
       coreRules: coreRules,
+      currentRevision: currentRevision,
     );
   }
 
@@ -114,7 +123,11 @@ class FilteringProvider with ChangeNotifier {
     if (result.successful == true) {
       _filtering = result.content as Filtering;
       _loadStatus = LoadStatus.loaded;
-      await _syncProvenanceWith(api.server, _filtering!.userRules);
+      await _syncProvenanceWith(
+        api.server,
+        _filtering!.userRules,
+        _filtering!.userRulesRevision,
+      );
       notifyListeners();
       return true;
     } else {
@@ -255,7 +268,11 @@ class FilteringProvider with ChangeNotifier {
         final target = refuseDuplicateRemoveRule.trim();
         final count = beforeRules.where((r) => r.trim() == target).length;
         if (count == 0) {
-          await _syncProvenanceWith(api.server, beforeRules);
+          await _syncProvenanceWith(
+            api.server,
+            beforeRules,
+            latestFiltering.userRulesRevision,
+          );
           _filtering = latestFiltering;
           notifyListeners();
           return const RuleMutationResult(
@@ -264,7 +281,11 @@ class FilteringProvider with ChangeNotifier {
           );
         }
         if (count > 1) {
-          await _syncProvenanceWith(api.server, beforeRules);
+          await _syncProvenanceWith(
+            api.server,
+            beforeRules,
+            latestFiltering.userRulesRevision,
+          );
           _filtering = latestFiltering;
           notifyListeners();
           return RuleMutationResult(
@@ -278,47 +299,51 @@ class FilteringProvider with ChangeNotifier {
 
       final expectedRev =
           explicitExpectedRevision ?? latestFiltering.userRulesRevision;
-      final newRules = transform(List<String>.from(beforeRules));
+      final submittedRules = transform(List<String>.from(beforeRules));
 
       final result = await api.setCustomRules(
-        rules: newRules,
+        rules: submittedRules,
         expectedRevision: expectedRev,
       );
 
       if (result.successful == true) {
         session.bumpLocalEpoch();
         // 优先回读最新状态与更新后的 revision，确保本地视图与服务端一致；
-        // 只有回读成功确认内容，才把变更记入本地手动来源库。
+        // 来源差异严格基于 `beforeRules -> submittedRules` 且仅在回读 revision 与列表全量一致时确认。
         final afterRes = await api.getFiltering();
         if (afterRes.successful == true && afterRes.content is Filtering) {
           final confirmedFiltering = afterRes.content as Filtering;
           _filtering = confirmedFiltering;
-          final afterRules = List<String>.from(confirmedFiltering.userRules);
-          final diff = RuleListDiffResult.diff(beforeRules, afterRules);
 
-          final saved = await _provenanceService.applyRuleListMutationDiff(
+          final provOut = await _provenanceService.applyCommitBoundDiff(
             serverKey: session.serverKey,
-            rulesBefore: beforeRules,
-            rulesAfter: afterRules,
+            rulesBeforeCommit: beforeRules,
+            beforeRevision: latestFiltering.userRulesRevision,
+            rulesSubmitted: submittedRules,
+            rulesReadback: confirmedFiltering.userRules,
+            committedRevision: result.userRulesRevisionHeader,
+            readbackRevision: confirmedFiltering.userRulesRevision,
             entryPoint: entryPoint,
-            confirmedRevision: result.userRulesRevisionHeader ??
-                confirmedFiltering.userRulesRevision,
           );
           _flushDnsCaches();
           notifyListeners();
-          final addedTotal = diff.addedCounts.values.fold(0, (a, b) => a + b);
-          final removedTotal =
-              diff.removedCounts.values.fold(0, (a, b) => a + b);
           return RuleMutationResult(
             ok: true,
-            provenanceSaveFailed: !saved,
-            addedCount: addedTotal,
-            removedCount: removedTotal,
-            message: saved ? null : '规则已添加，但来源记录保存失败。',
+            provenanceSaveFailed: provOut.storeSaveFailed,
+            provenanceInterrupted: provOut.interruptedByExternalUpdate,
+            provenanceLegacyUnconfirmed: provOut.legacyUnconfirmed,
+            addedCount: provOut.addedCount,
+            removedCount: provOut.removedCount,
+            message: provOut.message,
           );
         } else {
+          await _syncProvenanceWith(
+            api.server,
+            beforeRules,
+            latestFiltering.userRulesRevision,
+          );
           final filteringData = _filtering ?? latestFiltering;
-          filteringData.userRules = newRules;
+          filteringData.userRules = submittedRules;
           _filtering = filteringData;
           _flushDnsCaches();
           notifyListeners();
@@ -333,7 +358,11 @@ class FilteringProvider with ChangeNotifier {
           final refreshed = await api.getFiltering();
           if (refreshed.successful == true && refreshed.content is Filtering) {
             _filtering = refreshed.content as Filtering;
-            await _syncProvenanceWith(api.server, _filtering!.userRules);
+            await _syncProvenanceWith(
+              api.server,
+              _filtering!.userRules,
+              _filtering!.userRulesRevision,
+            );
           }
           notifyListeners();
           return const RuleMutationResult(

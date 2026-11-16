@@ -50,16 +50,13 @@ class AddFiltersButton extends StatelessWidget {
 
       if (!context.mounted) return;
       if (result.ok) {
-        if (result.provenanceSaveFailed) {
+        if (result.provenanceInterrupted ||
+            result.provenanceSaveFailed ||
+            result.provenanceLegacyUnconfirmed ||
+            result.readbackFailed) {
           showSnackbar(
             appConfigProvider: appConfigProvider,
-            label: result.message ?? '规则已添加，但来源记录保存失败。',
-            color: Colors.orange,
-          );
-        } else if (result.readbackFailed) {
-          showSnackbar(
-            appConfigProvider: appConfigProvider,
-            label: result.message ?? '规则已提交，但回读确认 Core 状态失败',
+            label: result.message ?? '规则操作已提交，但来源确认未完成',
             color: Colors.orange,
           );
         } else {
@@ -97,16 +94,13 @@ class AddFiltersButton extends StatelessWidget {
 
       if (!context.mounted) return;
       if (result.ok) {
-        if (result.provenanceSaveFailed) {
+        if (result.provenanceInterrupted ||
+            result.provenanceSaveFailed ||
+            result.provenanceLegacyUnconfirmed ||
+            result.readbackFailed) {
           showSnackbar(
             appConfigProvider: appConfigProvider,
-            label: result.message ?? '规则已添加，但来源记录保存失败。',
-            color: Colors.orange,
-          );
-        } else if (result.readbackFailed) {
-          showSnackbar(
-            appConfigProvider: appConfigProvider,
-            label: result.message ?? '规则已提交，但回读确认 Core 状态失败',
+            label: result.message ?? '规则操作已提交，但来源确认未完成',
             color: Colors.orange,
           );
         } else {

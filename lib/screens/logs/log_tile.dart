@@ -90,7 +90,10 @@ class LogTile extends StatelessWidget {
       processModal.close();
       if (!context.mounted) return;
       if (outcome.ok) {
-        if (outcome.provenanceSaveFailed || outcome.readbackFailed) {
+        if (outcome.provenanceInterrupted ||
+            outcome.provenanceSaveFailed ||
+            outcome.provenanceLegacyUnconfirmed ||
+            outcome.readbackFailed) {
           showSnackbar(
             appConfigProvider: appConfigProvider,
             label: outcome.message ?? l10n.userFilteringRulesUpdated,

@@ -17,6 +17,8 @@ class BlockUnblockOutcome {
   final bool ok;
   final bool conflictDetected;
   final bool provenanceSaveFailed;
+  final bool provenanceInterrupted;
+  final bool provenanceLegacyUnconfirmed;
   final bool readbackFailed;
   final String? message;
 
@@ -24,6 +26,8 @@ class BlockUnblockOutcome {
     required this.ok,
     this.conflictDetected = false,
     this.provenanceSaveFailed = false,
+    this.provenanceInterrupted = false,
+    this.provenanceLegacyUnconfirmed = false,
     this.readbackFailed = false,
     this.message,
   });
@@ -411,27 +415,39 @@ class StatusProvider with ChangeNotifier {
       if (result.successful == true) {
         session.bumpLocalEpoch();
 
-        // 写后回读最新规则状态并核对确实存在后再写入来源记录
+        // 写后回读最新规则状态并严格校验提交 revision 与列表全量一致，严禁用外部变更误记为本次手动操作
         final confirmRes = await api.getFilteringRules();
         bool provenanceSaveFailed = false;
+        bool provenanceInterrupted = false;
+        bool provenanceLegacyUnconfirmed = false;
         bool readbackFailed = false;
+        String? outcomeMessage;
         if (confirmRes.successful == true &&
             confirmRes.content is FilteringStatus) {
           final confirmed = confirmRes.content as FilteringStatus;
           _filteringStatus = confirmed;
-          final saved = await _provenanceService.applyRuleListMutationDiff(
+          final provOut = await _provenanceService.applyCommitBoundDiff(
             serverKey: session.serverKey,
-            rulesBefore: beforeRules,
-            rulesAfter: confirmed.userRules,
+            rulesBeforeCommit: beforeRules,
+            beforeRevision: fetched.userRulesRevision,
+            rulesSubmitted: newRules,
+            rulesReadback: confirmed.userRules,
+            committedRevision: result.userRulesRevisionHeader,
+            readbackRevision: confirmed.userRulesRevision,
             entryPoint: entryPoint,
-            confirmedRevision: result.userRulesRevisionHeader ??
-                confirmed.userRulesRevision,
           );
-          if (!saved) {
-            provenanceSaveFailed = true;
-          }
+          provenanceSaveFailed = provOut.storeSaveFailed;
+          provenanceInterrupted = provOut.interruptedByExternalUpdate;
+          provenanceLegacyUnconfirmed = provOut.legacyUnconfirmed;
+          outcomeMessage = provOut.message;
         } else {
+          await _provenanceService.syncWithCoreRules(
+            serverKey: session.serverKey,
+            coreRules: beforeRules,
+            currentRevision: fetched.userRulesRevision,
+          );
           readbackFailed = true;
+          outcomeMessage = '规则已提交，但回读确认 Core 状态失败，暂未写入已确认来源记录';
         }
 
         // 放行或拦截域名后立即清空 AGH 缓存和系统 DNS 缓存，无需等待 TTL 过期
@@ -443,10 +459,10 @@ class StatusProvider with ChangeNotifier {
         return BlockUnblockOutcome(
           ok: true,
           provenanceSaveFailed: provenanceSaveFailed,
+          provenanceInterrupted: provenanceInterrupted,
+          provenanceLegacyUnconfirmed: provenanceLegacyUnconfirmed,
           readbackFailed: readbackFailed,
-          message: provenanceSaveFailed
-              ? '规则已添加，但来源记录保存失败。'
-              : (readbackFailed ? '规则已提交，但回读确认 Core 状态失败，暂未写入已确认来源记录' : null),
+          message: outcomeMessage,
         );
       } else {
         if (result.statusCode == 409) {
@@ -458,6 +474,7 @@ class StatusProvider with ChangeNotifier {
             await _provenanceService.syncWithCoreRules(
               serverKey: session.serverKey,
               coreRules: fs.userRules,
+              currentRevision: fs.userRulesRevision,
             );
           }
           notifyListeners();
