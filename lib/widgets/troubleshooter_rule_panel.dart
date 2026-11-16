@@ -442,7 +442,7 @@ class _OutcomeStatusRow extends StatelessWidget {
           Wrap(
             spacing: 8,
             children: [
-              if (outcome.addedRule != null)
+              if (outcome.addedRule != null && outcome.undoToken != null)
                 TextButton(
                   onPressed: writeBusy ? null : () => onUndo(outcome.addedRule!),
                   style: TextButton.styleFrom(

@@ -365,6 +365,7 @@ void main() {
         '||imp.example^\$important',
       ];
       var cacheCleared = 0;
+      var rev = 1;
 
       server.listen((req) async {
         final path = req.uri.path;
@@ -376,6 +377,7 @@ void main() {
               'filters': [],
               'whitelist_filters': [],
               'user_rules': userRules,
+              'user_rules_revision': 'v2:inst:$rev',
               'interval': 24,
               'enabled': true,
             }));
@@ -388,8 +390,10 @@ void main() {
           userRules
             ..clear()
             ..addAll((body['rules'] as List).map((e) => e.toString()));
+          rev++;
           req.response
             ..statusCode = 200
+            ..headers.set('X-User-Rules-Revision', 'v2:inst:$rev')
             ..write('OK');
           await req.response.close();
           return;
@@ -559,7 +563,15 @@ void main() {
                     writeSucceeded: true,
                     verifiedUnblocked: true,
                     addedRule: '@@||u56112681.ct.sendgrid.net^',
-                    message: '放行已生效（旧连接需重连）',
+                    undoToken: ExceptionUndoToken(
+                      serverKey: 'test',
+                      rule: '@@||u56112681.ct.sendgrid.net^',
+                      addedIndex: 0,
+                      confirmedRevision: 'v2:inst:1',
+                      confirmedRulesFingerprint: '',
+                      confirmedLocalEpoch: 1,
+                    ),
+                    message: '规则检测确认放行',
                   ),
                 },
                 writeBusy: false,
@@ -922,7 +934,9 @@ void main() {
                   ..clear()
                   ..addAll((body['rules'] as List).map((e) => e.toString()));
                 bumpRev();
-                req.response.statusCode = 200;
+                req.response
+                  ..statusCode = 200
+                  ..headers.set('X-User-Rules-Revision', 'v1:${getRev()}');
               }
             } else if (p == '/control/filtering/check_host') {
               req.response
@@ -1138,6 +1152,226 @@ void main() {
         expect(conflictOut.message, contains('版本冲突'));
         expect(rulesA, contains('||external-client.example^'));
         expect(rulesA, isNot(contains('@@||race.example^')));
+      }, _PassthroughHttpOverrides());
+    });
+  });
+
+  group('RC3. Commit-Bound Revision & Undo Token Verification', () {
+    test('covers all 8 commit revision, readback mismatch, conservative legacy Core & restart scenarios', () async {
+      await HttpOverrides.runWithHttpOverrides(() async {
+        ServerRuleWriteQueue.resetForTest();
+
+        final rules = <String>['||init.example^'];
+        var coreInstance = 'instA';
+        var epoch = 1;
+        String currentRev() => 'v2:$coreInstance:$epoch';
+
+        String? overridePostHeader;
+        bool omitPostHeader = false;
+        void Function()? onAfterPostBeforeReadback;
+        List<String> Function(List<String> cur)? overrideStatusRules;
+        String? overrideStatusRev;
+        var postCount = 0;
+
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        server.listen((req) async {
+          final p = req.uri.path;
+          if (p == '/control/filtering/status') {
+            final useReadbackOverride = postCount > 0;
+            final respRules = (useReadbackOverride && overrideStatusRules != null)
+                ? overrideStatusRules(rules)
+                : rules;
+            final respRev = (useReadbackOverride && overrideStatusRev != null)
+                ? overrideStatusRev
+                : (omitPostHeader ? null : currentRev());
+            req.response
+              ..statusCode = 200
+              ..headers.contentType = ContentType.json
+              ..write(jsonEncode({
+                'filters': [],
+                'whitelist_filters': [],
+                'user_rules': respRules,
+                if (respRev != null) 'user_rules_revision': respRev,
+                'interval': 24,
+                'enabled': true,
+              }));
+          } else if (p == '/control/filtering/set_rules') {
+            final body = jsonDecode(await utf8.decoder.bind(req).join()) as Map<String, dynamic>;
+            final exp = body['expected_revision']?.toString();
+            if (exp != null && exp.isNotEmpty && exp != currentRev()) {
+              req.response
+                ..statusCode = 409
+                ..write('conflict');
+            } else {
+              rules
+                ..clear()
+                ..addAll((body['rules'] as List).map((e) => e.toString()));
+              epoch++;
+              postCount++;
+              onAfterPostBeforeReadback?.call();
+              onAfterPostBeforeReadback = null;
+              req.response.statusCode = 200;
+              if (!omitPostHeader) {
+                req.response.headers.set(
+                  'X-User-Rules-Revision',
+                  overridePostHeader ?? currentRev(),
+                );
+              }
+            }
+          } else if (p == '/control/filtering/check_host') {
+            req.response
+              ..statusCode = 200
+              ..headers.contentType = ContentType.json
+              ..write(jsonEncode({'reason': 'NotFilteredWhiteList', 'rules': []}));
+          } else if (p == '/control/cache_clear') {
+            req.response.statusCode = 200;
+          } else {
+            req.response.statusCode = 404;
+          }
+          await req.response.close();
+        });
+
+        final api = ApiClientV2(
+          server: Server(
+            id: 'rc3-srv',
+            name: 'RC3',
+            connectionMethod: 'http',
+            domain: '127.0.0.1',
+            port: server.port,
+            defaultServer: true,
+            runningOnHa: false,
+          ),
+        );
+        final coord = ExceptionRuleCoordinator();
+
+        // 1. POST whitelist succeeds, another client modifies ANOTHER rule before readback:
+        // must NOT rollback/overwrite other client's rule, live check continues, NO undoToken issued!
+        onAfterPostBeforeReadback = () {
+          // Simulates another client modifying index 0 right after our POST returned its header
+          rules[0] = '||edited-by-other.example^';
+          epoch++;
+        };
+        overridePostHeader = currentRev();
+        // Wait: onAfterPostBeforeReadback runs BEFORE req.response.headers.set, so capture expected post rev before bump!
+        final postHeader1 = 'v2:$coreInstance:${epoch + 1}';
+        overridePostHeader = postHeader1;
+        final out1 = await coord.applyExceptionAndVerify(
+          apiClient: api,
+          verifyHost: 'case1.rc3.example',
+          exceptionRule: '@@||case1.rc3.example^',
+        );
+        overridePostHeader = null;
+        expect(out1.writeSucceeded, isTrue);
+        expect(out1.verifiedUnblocked, isTrue);
+        expect(out1.undoToken, isNull);
+        expect(out1.undoDisabledReason, contains('配置已被其他操作更新'));
+        expect(out1.message, contains('无法确认撤销归属'));
+        // Other client's rule untouched; our added rule wasn't rolled back either
+        expect(rules, <String>['||edited-by-other.example^', '@@||case1.rc3.example^']);
+
+        // 2. POST succeeds, other client deletes & re-adds same exception before readback:
+        // list length and slot look identical, but readback revision differs -> NO undoToken!
+        final postHeader2 = 'v2:$coreInstance:${epoch + 1}';
+        overridePostHeader = postHeader2;
+        onAfterPostBeforeReadback = () {
+          rules.removeLast();
+          epoch++;
+          rules.add('@@||case2.rc3.example^');
+          epoch++;
+        };
+        final out2 = await coord.applyExceptionAndVerify(
+          apiClient: api,
+          verifyHost: 'case2.rc3.example',
+          exceptionRule: '@@||case2.rc3.example^',
+        );
+        overridePostHeader = null;
+        expect(out2.undoToken, isNull);
+        expect(out2.undoDisabledReason, contains('配置已被其他操作更新'));
+        expect(rules, contains('@@||case2.rc3.example^'));
+
+        // 3. Readback list length & added slot match, but revision differs -> NO undoToken!
+        postCount = 0;
+        overrideStatusRev = 'v2:$coreInstance:different';
+        final out3 = await coord.applyExceptionAndVerify(
+          apiClient: api,
+          verifyHost: 'case3.rc3.example',
+          exceptionRule: '@@||case3.rc3.example^',
+        );
+        overrideStatusRev = null;
+        expect(out3.writeSucceeded, isTrue);
+        expect(out3.undoToken, isNull);
+        expect(out3.undoDisabledReason, contains('无法确认撤销归属'));
+
+        // 4. Readback revision equals POST revision, but full list differs from expected submitted list -> NO undoToken!
+        postCount = 0;
+        overrideStatusRules = (cur) => <String>[
+              ...cur.sublist(0, cur.length - 1).map((e) => '$e!mutated'),
+              cur.last,
+            ];
+        final out4 = await coord.applyExceptionAndVerify(
+          apiClient: api,
+          verifyHost: 'case4.rc3.example',
+          exceptionRule: '@@||case4.rc3.example^',
+        );
+        overrideStatusRules = null;
+        expect(out4.writeSucceeded, isTrue);
+        expect(out4.undoToken, isNull);
+        expect(out4.undoDisabledReason, contains('无法确认撤销归属'));
+
+        // 5. Legacy Core omits X-User-Rules-Revision -> conservative: live check works, NO undoToken!
+        omitPostHeader = true;
+        final out5 = await coord.applyExceptionAndVerify(
+          apiClient: api,
+          verifyHost: 'legacy.rc3.example',
+          exceptionRule: '@@||legacy.rc3.example^',
+        );
+        omitPostHeader = false;
+        expect(out5.writeSucceeded, isTrue);
+        expect(out5.verifiedUnblocked, isTrue);
+        expect(out5.undoToken, isNull);
+        expect(out5.undoDisabledReason, contains('未返回提交版本号'));
+
+        // 6. Normal commit + normal readback + normal undo removes ONLY added rule!
+        final out6 = await coord.applyExceptionAndVerify(
+          apiClient: api,
+          verifyHost: 'ok.rc3.example',
+          exceptionRule: '@@||ok.rc3.example^',
+        );
+        expect(out6.writeSucceeded, isTrue);
+        expect(out6.verifiedUnblocked, isTrue);
+        expect(out6.undoToken, isNotNull);
+        expect(out6.undoToken!.confirmedRevision, currentRev());
+        final undo6 = await coord.undoAddedException(
+          apiClient: api,
+          addedRule: '@@||ok.rc3.example^',
+          undoToken: out6.undoToken,
+        );
+        expect(undo6.ok, isTrue);
+        expect(rules, isNot(contains('@@||ok.rc3.example^')));
+        expect(rules, contains('||edited-by-other.example^'));
+
+        // 7. Core restarts with identical rules AND identical epoch counter, only instance ID changes:
+        // old instance undoToken MUST be refused and all rules preserved!
+        final out7 = await coord.applyExceptionAndVerify(
+          apiClient: api,
+          verifyHost: 'restart.rc3.example',
+          exceptionRule: '@@||restart.rc3.example^',
+        );
+        expect(out7.undoToken, isNotNull);
+        final savedEpoch = epoch;
+        coreInstance = 'instB_restarted';
+        epoch = savedEpoch; // Same epoch & identical rules, only instance changed!
+        final snapshotBeforeUndo = List<String>.from(rules);
+
+        final undoRestart = await coord.undoAddedException(
+          apiClient: api,
+          addedRule: '@@||restart.rc3.example^',
+          undoToken: out7.undoToken,
+        );
+        expect(undoRestart.ok, isFalse);
+        expect(undoRestart.message, contains('拒绝猜测删除'));
+        expect(rules, snapshotBeforeUndo);
       }, _PassthroughHttpOverrides());
     });
   });

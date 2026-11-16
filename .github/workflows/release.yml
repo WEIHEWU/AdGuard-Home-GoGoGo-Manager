@@ -21,24 +21,20 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.23-rc.1
-          name: "AdGuard-Home-GoGoGo Manager v2.24.23-rc.1 (Pre-release)"
+          tag_name: v2.24.24-rc.1
+          name: "AdGuard-Home-GoGoGo Manager v2.24.24-rc.1 (Pre-release)"
           prerelease: true
           make_latest: false
           body: |
-            ### AdGuard-Home-GoGoGo Manager `v2.24.23-rc.1` (Candidate / Pre-release)
+            ### AdGuard-Home-GoGoGo Manager `v2.24.24-rc.1` (Candidate / Pre-release)
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests, Manager static analysis & 34 unit/widget/HTTP mock tests, and APK signature/ABI verification passed; on-device Android verification (SendGrid full URL -> rule hit -> SNI/DNS log -> narrow allowlist -> re-check -> retry -> undo) is pending.
+            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests, Manager static analysis & 35 unit/widget/HTTP mock tests, and APK signature/ABI verification passed; on-device Android verification (SendGrid check -> confirmed narrow allowlist -> A/AAAA verify -> retry -> undo) is pending.
 
-            #### 🆕 v2.24.23-rc.1 补修亮点
-            - **完整版本化离线 PSL 边界（ICANN + PRIVATE + 通配 + 例外）**：
-              - 公共后缀判定、可注册域名计算、父域名展开与加白范围安全校验共用统一离线 PSL 实现（支持 `github.io`/`appspot.com` 等 PRIVATE 后缀、`*.ck` 通配与 `!www.ck`/`!city.kawasaki.jp` 例外规则），未知边界禁用宽范围放行而不盲猜两段。
-            - **写后 A/AAAA 严格分项核验与诚实提示**：
-              - `A` 或 `AAAA` 任一阻断、失败、超时、不支持、未知 `reason`、`NotFilteredError` 或命中 `Rewrite` 均不误报全绿成功；缓存刷新失败如实标注“部分完成”，并提示规则检测通过不保证应用/链接本身可用。
-            - **跨入口共享服务器写队列 + Core 原子 `expected_revision` 防冲突 + 可核验撤销**：
-              - `ExceptionRuleCoordinator`、`FilteringProvider`、`StatusProvider` 共用按服务器隔离的串行队列；配套 Core `v2026-11-16-rc.2` 原子版本检查（`409 Conflict`）；
-              - 撤销前验证服务器、完整规则快照与修订凭证，用户在外部或规则页删除后重加相同文本时拒绝猜测删除。
+            #### 🆕 v2.24.24-rc.1 收尾补修亮点
+            - **基于提交 `X-User-Rules-Revision` 与核心实例 ID 的可核验撤销归属**：
+              - 写入自定义规则时读取 POST 返回头 `X-User-Rules-Revision`，回读 `/filtering/status` 时必须同时满足版本号等于本次提交版本号、完整规则逐项一致与新增槽位匹配才签发撤销凭证；
+              - 配套 `Core v2026-11-16-rc.3` 每次启动生成唯一核心实例 ID，核心重启或配置被其他客户端更新后旧撤销凭证一律保守拒绝并保留既有规则；不支持提交版本的旧核心保守禁用自动撤销。
           files: |
             releases/AdGuardHomeManager.apk

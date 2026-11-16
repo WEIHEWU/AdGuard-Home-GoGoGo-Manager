@@ -1050,11 +1050,13 @@ class ServerQueueSession {
 }
 
 /// 可核验的例外规则新增凭证：用于撤销前证明目标规则仍属于该次操作而非用户删改后同文本重加。
+/// 仅在 Core 返回可靠的提交 `X-User-Rules-Revision` 且回读状态（版本与完整规则逐项指纹）
+/// 严格等于本次提交状态时签发。
 class ExceptionUndoToken {
   final String serverKey;
   final String rule;
   final int addedIndex;
-  final String? confirmedRevision;
+  final String confirmedRevision;
   final String confirmedRulesFingerprint;
   final int confirmedLocalEpoch;
 
@@ -1078,6 +1080,7 @@ class ExceptionWriteOutcome {
   final bool conflictDetected;
   final String? addedRule;
   final ExceptionUndoToken? undoToken;
+  final String? undoDisabledReason;
   final HostCheckResult? postCheckResult;
   final HostCheckResult? postCheckA;
   final HostCheckResult? postCheckAAAA;
@@ -1092,6 +1095,7 @@ class ExceptionWriteOutcome {
     this.conflictDetected = false,
     this.addedRule,
     this.undoToken,
+    this.undoDisabledReason,
     this.postCheckResult,
     this.postCheckA,
     this.postCheckAAAA,
@@ -1143,8 +1147,11 @@ class ExceptionRuleCoordinator {
 
       String? addedRule;
       ExceptionUndoToken? undoToken;
+      String? undoDisabledReason;
       if (!alreadyExists) {
         final updatedRules = List<String>.from(existingRules)..add(cleanRule);
+        final expectedSubmittedFp =
+            ServerRuleWriteQueue.fingerprintRules(updatedRules);
         final addedIdx = existingRules.length;
 
         final setRes = await apiClient.setCustomRules(
@@ -1169,47 +1176,52 @@ class ExceptionRuleCoordinator {
           );
         }
 
+        final committedRev = setRes.userRulesRevisionHeader;
         final newEpoch = session.bumpLocalEpoch();
 
-        // 2) 回读 /filtering/status 确认持久化与新版本号
+        // 2) 回读 /filtering/status，严格核对提交 revision、完整规则逐项一致与新增槽位，绝不回滚或覆盖其他客户端修改
         final confirmRes = await apiClient.getFiltering();
         if (!confirmRes.successful || confirmRes.content is! Filtering) {
-          return ExceptionWriteOutcome(
-            writeSucceeded: true,
-            verifiedUnblocked: false,
-            verificationIncomplete: true,
-            addedRule: cleanRule,
-            message: '规则已提交，但回读确认核心状态失败，无法建立安全撤销凭证，请手动检查',
-          );
-        }
-        final confirmedData = confirmRes.content as Filtering;
-        final confirmedRules = List<String>.from(confirmedData.userRules);
-        final matchesInserted = addedIdx < confirmedRules.length &&
-            confirmedRules[addedIdx].trim() == cleanRule &&
-            confirmedRules.length == updatedRules.length;
-        final containsRule = confirmedRules.any((r) => r.trim() == cleanRule);
-        if (!containsRule) {
-          return const ExceptionWriteOutcome(
-            writeSucceeded: false,
-            verifiedUnblocked: false,
-            message: '核心状态回读未包含新增规则，写入未生效',
-          );
-        }
+          undoDisabledReason = '回读确认核心状态失败，无法确认撤销归属，暂不提供自动撤销';
+        } else {
+          final confirmedData = confirmRes.content as Filtering;
+          final confirmedRules = List<String>.from(confirmedData.userRules);
+          final readbackRev = confirmedData.userRulesRevision?.trim();
+          final readbackFp =
+              ServerRuleWriteQueue.fingerprintRules(confirmedRules);
+          final slotMatches = addedIdx < confirmedRules.length &&
+              confirmedRules[addedIdx].trim() == cleanRule;
 
-        addedRule = cleanRule;
-        if (matchesInserted) {
-          undoToken = ExceptionUndoToken(
-            serverKey: session.serverKey,
-            rule: cleanRule,
-            addedIndex: addedIdx,
-            confirmedRevision: confirmedData.userRulesRevision,
-            confirmedRulesFingerprint:
-                ServerRuleWriteQueue.fingerprintRules(confirmedRules),
-            confirmedLocalEpoch: newEpoch,
-          );
-          _lastTokensByRuleKey[_tokenKey(session.serverKey, cleanRule)] =
-              undoToken;
+          if (committedRev == null || committedRev.isEmpty) {
+            // 旧核心不返回提交 revision：保守不签发跨客户端撤销凭证，仍继续实时规则检测
+            undoDisabledReason = '当前核心未返回提交版本号，无法证明跨客户端撤销归属，已禁用本次自动撤销';
+          } else if (readbackRev == null || readbackRev != committedRev) {
+            // 提交与回读之间已被其他操作更新：绝不回滚或覆盖其他规则，仅禁用自动撤销
+            undoDisabledReason = '配置已被其他操作更新，无法确认撤销归属';
+          } else if (readbackFp != expectedSubmittedFp || !slotMatches) {
+            // 即使 revision 字串一致但完整列表不符合预期：同样拒绝签发撤销凭证
+            undoDisabledReason = '配置已被其他操作更新，无法确认撤销归属';
+          } else {
+            addedRule = cleanRule;
+            undoToken = ExceptionUndoToken(
+              serverKey: session.serverKey,
+              rule: cleanRule,
+              addedIndex: addedIdx,
+              confirmedRevision: committedRev,
+              confirmedRulesFingerprint: readbackFp,
+              confirmedLocalEpoch: newEpoch,
+            );
+            _lastTokensByRuleKey[_tokenKey(session.serverKey, cleanRule)] =
+                undoToken;
+          }
         }
+      }
+
+      String withUndoNotice(String baseMessage) {
+        if (undoDisabledReason == null || undoDisabledReason.isEmpty) {
+          return baseMessage;
+        }
+        return '$baseMessage（$undoDisabledReason）';
       }
 
       // 3) 清理核心 DNS 缓存与 Android 系统缓存（失败按部分完成实报）
@@ -1276,11 +1288,12 @@ class ExceptionRuleCoordinator {
             cacheFlushFailed: cacheFlushFailed,
             addedRule: addedRule,
             undoToken: undoToken,
+            undoDisabledReason: undoDisabledReason,
             postCheckResult: primary,
             postCheckA: resA,
             postCheckAAAA: resAAAA,
-            message:
-                '规则已写入，但 $blockedTypes 仍被带 \$important 优先级规则阻断（$topRule）',
+            message: withUndoNotice(
+                '规则已写入，但 $blockedTypes 仍被带 \$important 优先级规则阻断（$topRule）'),
           );
         }
         return ExceptionWriteOutcome(
@@ -1289,10 +1302,11 @@ class ExceptionRuleCoordinator {
           cacheFlushFailed: cacheFlushFailed,
           addedRule: addedRule,
           undoToken: undoToken,
+          undoDisabledReason: undoDisabledReason,
           postCheckResult: primary,
           postCheckA: resA,
           postCheckAAAA: resAAAA,
-          message: '规则已写入，但 $blockedTypes 实时检测仍被阻断：$topRule',
+          message: withUndoNotice('规则已写入，但 $blockedTypes 实时检测仍被阻断：$topRule'),
         );
       }
 
@@ -1307,11 +1321,12 @@ class ExceptionRuleCoordinator {
           cacheFlushFailed: cacheFlushFailed,
           addedRule: addedRule,
           undoToken: undoToken,
+          undoDisabledReason: undoDisabledReason,
           postCheckResult: rw,
           postCheckA: resA,
           postCheckAAAA: resAAAA,
-          message:
-              '规则已提交，但 ${rw.qtype} 命中重写规则处理（${rw.rawReason}），不等于正常放行',
+          message: withUndoNotice(
+              '规则已提交，但 ${rw.qtype} 命中重写规则处理（${rw.rawReason}），不等于正常放行'),
         );
       }
 
@@ -1327,10 +1342,12 @@ class ExceptionRuleCoordinator {
             cacheFlushFailed: true,
             addedRule: addedRule,
             undoToken: undoToken,
+            undoDisabledReason: undoDisabledReason,
             postCheckResult: resA,
             postCheckA: resA,
             postCheckAAAA: resAAAA,
-            message: '规则检测确认放行，但 DNS 缓存刷新失败（部分完成，请稍候或手动切换网络清缓存）。$caveat',
+            message: withUndoNotice(
+                '规则检测确认放行，但 DNS 缓存刷新失败（部分完成，请稍候或手动切换网络清缓存）。$caveat'),
           );
         }
         return ExceptionWriteOutcome(
@@ -1339,10 +1356,11 @@ class ExceptionRuleCoordinator {
           cacheFlushFailed: false,
           addedRule: addedRule,
           undoToken: undoToken,
+          undoDisabledReason: undoDisabledReason,
           postCheckResult: resA,
           postCheckA: resA,
           postCheckAAAA: resAAAA,
-          message: '规则检测确认放行。$caveat',
+          message: withUndoNotice('规则检测确认放行。$caveat'),
         );
       }
 
@@ -1357,10 +1375,11 @@ class ExceptionRuleCoordinator {
         cacheFlushFailed: cacheFlushFailed,
         addedRule: addedRule,
         undoToken: undoToken,
+        undoDisabledReason: undoDisabledReason,
         postCheckResult: incompleteRes,
         postCheckA: resA,
         postCheckAAAA: resAAAA,
-        message: '规则已提交，但核验不完整（$statusSummary），请手动确认或重试检测',
+        message: withUndoNotice('规则已提交，但核验不完整（$statusSummary），请手动确认或重试检测'),
       );
     });
   }
@@ -1409,17 +1428,12 @@ class ExceptionRuleCoordinator {
           token.addedIndex < current.length &&
           current[token.addedIndex].trim() == clean;
 
-      bool ownershipProven;
-      if (token.confirmedRevision != null) {
-        ownershipProven = filteringData.userRulesRevision == token.confirmedRevision &&
-            currentFp == token.confirmedRulesFingerprint &&
-            idxInBounds;
-      } else {
-        // 旧核心无 user_rules_revision：严格比对完整规则快照与本客户端局部修改代数
-        ownershipProven = session.localEpoch == token.confirmedLocalEpoch &&
-            currentFp == token.confirmedRulesFingerprint &&
-            idxInBounds;
-      }
+      final currentRev = filteringData.userRulesRevision?.trim();
+      final ownershipProven = token.confirmedRevision.isNotEmpty &&
+          currentRev != null &&
+          currentRev == token.confirmedRevision &&
+          currentFp == token.confirmedRulesFingerprint &&
+          idxInBounds;
 
       if (!ownershipProven) {
         _lastTokensByRuleKey.remove(_tokenKey(session.serverKey, clean));

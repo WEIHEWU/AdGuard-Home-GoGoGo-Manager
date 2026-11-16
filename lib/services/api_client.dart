@@ -13,12 +13,19 @@ class ApiResponse {
   final bool successful;
   final dynamic content;
   final int? statusCode;
+  final Map<String, String> headers;
 
   const ApiResponse({
     required this.successful,
     this.content,
     this.statusCode,
+    this.headers = const <String, String>{},
   });
+
+  String? get userRulesRevisionHeader {
+    final v = headers['x-user-rules-revision']?.trim();
+    return (v != null && v.isNotEmpty) ? v : null;
+  }
 }
 
 class ApiClientV2 {
@@ -206,6 +213,7 @@ class ApiClientV2 {
       successful: result.successful,
       statusCode: result.statusCode,
       content: result.body,
+      headers: result.headers,
     );
   }
 
@@ -225,17 +233,20 @@ class ApiClientV2 {
           successful: true,
           statusCode: results1.statusCode,
           content: filtering,
+          headers: results1.headers,
         );
       } catch (_) {
         return ApiResponse(
           successful: false,
           statusCode: results1.statusCode,
+          headers: results1.headers,
         );
       }
     } else {
       return ApiResponse(
         successful: false,
         statusCode: results1.statusCode,
+        headers: results1.headers,
       );
     }
   }
@@ -257,6 +268,7 @@ class ApiClientV2 {
       successful: result.successful,
       statusCode: result.statusCode,
       content: result.body,
+      headers: result.headers,
     );
   }
 

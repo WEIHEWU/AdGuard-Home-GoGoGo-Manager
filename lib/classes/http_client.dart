@@ -11,12 +11,14 @@ class HttpResponse {
   final String? body;
   final int? statusCode;
   final ExceptionType? exception;
+  final Map<String, String> headers;
 
   const HttpResponse({
     required this.successful,
     required this.body,
     required this.statusCode,
     this.exception,
+    this.headers = const <String, String>{},
   });
 }
 
@@ -29,6 +31,16 @@ String getConnectionString({
 
 class HttpRequestClient {
   static HttpClient? _sharedClient;
+
+  static Map<String, String> _extractHeaders(HttpClientResponse response) {
+    final map = <String, String>{};
+    response.headers.forEach((name, values) {
+      if (values.isNotEmpty) {
+        map[name.toLowerCase()] = values.first;
+      }
+    });
+    return map;
+  }
 
   static HttpClient _getClient() {
     final existing = _sharedClient;
@@ -70,6 +82,7 @@ class HttpRequestClient {
         successful: response.statusCode >= 400 ? false : true,
         body: reply,
         statusCode: response.statusCode,
+        headers: _extractHeaders(response),
       );
     } on SocketException {
       _resetClient();
@@ -152,6 +165,7 @@ class HttpRequestClient {
         successful: response.statusCode >= 400 ? false : true,
         body: reply,
         statusCode: response.statusCode,
+        headers: _extractHeaders(response),
       );
     } on SocketException {
       _resetClient();
@@ -227,6 +241,7 @@ class HttpRequestClient {
         successful: response.statusCode >= 400 ? false : true,
         body: reply,
         statusCode: response.statusCode,
+        headers: _extractHeaders(response),
       );
     } on SocketException {
       _resetClient();
