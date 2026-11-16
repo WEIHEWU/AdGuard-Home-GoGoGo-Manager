@@ -2,14 +2,16 @@ name: Publish Release
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: publish-manager-release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -21,23 +23,25 @@ jobs:
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.24.26-rc.1
-          name: "AdGuard-Home-GoGoGo Manager v2.24.26-rc.1 (Pre-release)"
-          prerelease: true
-          make_latest: false
+          tag_name: ${{ github.ref_name == 'main' && 'v2.24.26' || github.ref_name }}
+          name: "AdGuard-Home-GoGoGo Manager ${{ github.ref_name == 'main' && 'v2.24.26' || github.ref_name }}"
+          draft: false
+          prerelease: false
+          make_latest: true
           body: |
-            ### AdGuard-Home-GoGoGo Manager `v2.24.26-rc.1` (Candidate / Pre-release)
+            ### AdGuard-Home-GoGoGo Manager `v2.24.26`
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            > ⚠️ Candidate pre-release: Core race/unit/android_slim (Linux ARM64) tests unchanged at `v2026-11-16-rc.3`, Manager static analysis & all 46 unit/widget/HTTP mock tests, and APK signature/ABI verification passed; on-device Android verification is pending.
+            > ⚠️ **验证与实机状态说明**：Core（Linux ARM64、`android_slim`、`race`/单元测试）、Manager 静态分析与 46 项单元/Widget/本地模拟 HTTP 回归测试、APK 签名及包体核验已通过；本端环境未连接实机（`adb devices -l` 为空），完整实机端到端交互验收待实机检验。
 
-            #### 🆕 v2.24.26-rc.1 手动规则来源精准绑定补修
-            - **提交绑定型来源记录（`applyCommitBoundDiff`）**：
-              - 写入前后严格仅对“提交前列表 → 实际提交列表”计算差异，并通过 `X-User-Rules-Revision` 与回读全量逐项校验确认后才确认来源；若期间被外部并发修改打断，不回滚也不误记外部规则并提示“规则操作已提交，但来源确认被其他更新打断”；旧核心无版本信息时自动降级为`待确认`。
-            - **区分“历史来源”与“当前关联”**：
-              - 同一可信版本或本端连续确认修改维持`已确认`；未观测外部版本偏移、外部删除再重加或核心重启均保留历史信息与备注但自动降级为`待确认`，重复相同行降为`重复歧义`，禁止靠同文本自动恢复归属。
-            - **备份导入安全加固**：
-              - 严格校验 `action` / `source` / `sync_status` 枚举，未知枚举直接拒绝；导入保留历史时间、历史来源与备注但当前关联默认`待确认`（不存在则`已不存在`），不覆盖本地已有`已确认`记录且绝不改动 Core 规则。
+            #### 主要更新与功能特性
+            - **模式切换及 Android `flock` 兼容修复**：父 Shell 统一初始化单调时钟记录各切换阶段耗时，消除重复配置校验，单次 `post_apply_check` 核对 `443`/`8443` NFQUEUE 与 `--queue-bypass`、`GID 23333` 核心豁免，支持 Android 兼容的 `flock` 串行协调。
+            - **调试日志开关与脱敏诊断包导出**：默认关闭且支持定时自动关闭的模块详细调试日志（独立日志锁短事务轮转）；一键导出全链路脱敏诊断 ZIP（不收集手动规则备注/原文、DNS 查询历史与账号凭据）并调用系统分享。
+            - **实时误杀排错、SNI 记录及阻断聚合**：基于离线 PSL（ICANN + PRIVATE）实时查询 `A` / `AAAA` `/control/filtering/check_host`，补充核心 `FilteredSNI` 查询日志与同秒阻断聚合。
+            - **用户确认的分级放行与安全撤销**：由用户明确确认两级放行建议，`set_rules` 通过 `expected_revision` 与写后 `X-User-Rules-Revision` 回读绑定撤销凭证 防误删。
+            - **手动规则来源、备注和集中管理**：涵盖误杀排错、日志详情、自定义规则单条添加/批量编辑/移除全入口；区分“历史来源（手动新增/用户认领）”与“当前关联（已确认/已不存在/待确认/重复歧义）”；支持“我的手动规则”管理页、`检查是否生效` 与备份 JSON 导出/校验导入。
+
+            > ℹ️ **存储与关联说明**：手动来源记录和备注保存在管理器本地，正常升级及软重启应保持；卸载或清除应用数据可能丢失，请使用备份功能。核心重启或外部规则修改后，“当前关联”可能变为待确认，不代表规则被删除。
           files: |
             releases/AdGuardHomeManager.apk
