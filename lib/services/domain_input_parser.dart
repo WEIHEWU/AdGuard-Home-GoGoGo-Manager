@@ -1,4 +1,29 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:adguard_home_manager/services/public_suffix_data.g.dart';
+
+/// 公共后缀匹配结果（ICANN / PRIVATE / 通配 / 例外规则）。
+class PublicSuffixMatch {
+  final String version;
+  final String suffix;
+  final bool icann;
+  final bool isPrivate;
+  final bool isKnownRule;
+  final bool isPublicSuffix;
+  final String? registrableDomain;
+
+  const PublicSuffixMatch({
+    required this.version,
+    required this.suffix,
+    required this.icann,
+    required this.isPrivate,
+    required this.isKnownRule,
+    required this.isPublicSuffix,
+    required this.registrableDomain,
+  });
+}
 
 /// 单个 URL / 域名输入的规范化解析结果（纯离线，绝不向目标 URL 发起任何网络请求）。
 class DomainParseResult {
@@ -49,44 +74,10 @@ class DomainInputParser {
   static final RegExp _httpSchemeCountRe =
       RegExp(r'https?://', caseSensitive: false);
   static final RegExp _wsRe = RegExp(r'\s+');
-  static final RegExp _asciiLabelRe = RegExp(r'^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$');
+  static final RegExp _asciiLabelRe =
+      RegExp(r'^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$');
 
-  /// 常见多级公共后缀表（完全离线，避免联网拉取 PSL）。
-  /// 在判断是否可作为父域名检测/加白终点时，任何 1 级后缀与下列 2/3 级公共后缀均视为不可注册后缀。
-  static const Set<String> _multiLabelPublicSuffixes = <String>{
-    // UK
-    'co.uk', 'org.uk', 'me.uk', 'net.uk', 'ltd.uk', 'plc.uk', 'ac.uk', 'gov.uk', 'sch.uk',
-    // AU
-    'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'asn.au', 'id.au',
-    // CN
-    'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn', 'ac.cn', 'mil.cn',
-    'bj.cn', 'sh.cn', 'tj.cn', 'cq.cn', 'he.cn', 'sx.cn', 'nm.cn', 'ln.cn',
-    'jl.cn', 'hl.cn', 'js.cn', 'zj.cn', 'ah.cn', 'fj.cn', 'jx.cn', 'sd.cn',
-    'ha.cn', 'hb.cn', 'hn.cn', 'gd.cn', 'gx.cn', 'hi.cn', 'sc.cn', 'gz.cn',
-    'yn.cn', 'xz.cn', 'sn.cn', 'gs.cn', 'qh.cn', 'nx.cn', 'xj.cn', 'hk.cn', 'mo.cn', 'tw.cn',
-    // JP
-    'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'ad.jp', 'ed.jp', 'go.jp', 'gr.jp', 'lg.jp',
-    // TW / HK / MO / KR / SG / MY / NZ / ZA / IN / ID / BR / MX / TR / RU / VN / IL / TH
-    'com.tw', 'org.tw', 'net.tw', 'edu.tw', 'gov.tw', 'idv.tw', 'game.tw',
-    'com.hk', 'org.hk', 'net.hk', 'edu.hk', 'gov.hk', 'idv.hk',
-    'com.mo', 'org.mo', 'net.mo', 'edu.mo', 'gov.mo',
-    'co.kr', 'ne.kr', 'or.kr', 're.kr', 'pe.kr', 'go.kr', 'ac.kr', 'hs.kr', 'ms.kr', 'es.kr',
-    'com.sg', 'org.sg', 'net.sg', 'edu.sg', 'gov.sg', 'per.sg',
-    'com.my', 'net.my', 'org.my', 'edu.my', 'gov.my',
-    'co.nz', 'org.nz', 'net.nz', 'govt.nz', 'ac.nz', 'school.nz', 'maori.nz',
-    'co.za', 'org.za', 'net.za', 'gov.za', 'ac.za',
-    'co.in', 'firm.in', 'net.in', 'org.in', 'gen.in', 'ind.in', 'nic.in', 'ac.in', 'edu.in', 'res.in', 'gov.in',
-    'co.id', 'or.id', 'web.id', 'sch.id', 'ac.id', 'go.id', 'net.id',
-    'com.br', 'org.br', 'net.br', 'gov.br', 'edu.br',
-    'com.mx', 'org.mx', 'net.mx', 'gob.mx', 'edu.mx',
-    'com.tr', 'org.tr', 'net.tr', 'gov.tr', 'edu.tr', 'gen.tr',
-    'com.ru', 'org.ru', 'net.ru', 'pp.ru',
-    'com.vn', 'net.vn', 'org.vn', 'gov.vn', 'edu.vn',
-    'co.il', 'org.il', 'net.il', 'ac.il', 'gov.il', 'muni.il',
-    'co.th', 'in.th', 'ac.th', 'go.th', 'or.th', 'net.th',
-    // EU / misc ccSLDs
-    'co.cc', 'com.ua', 'org.ua', 'net.ua', 'co.at', 'or.at',
-  };
+  static String get pslVersionString => pslVersion;
 
   /// 解析单个用户输入的 URL 或域名；遇多链接、空白歧义或非法输入时返回错误原因而不猜测拼接。
   static DomainParseResult parseSingleInput(String rawInput) {
@@ -316,7 +307,38 @@ class DomainInputParser {
     return s;
   }
 
-  /// 判断域名是否为公共后缀（如 net、co.uk、com.au），绝不允许继续检测或建议加白公共后缀。
+  /// 使用版本化离线 PSL（含 ICANN 与 PRIVATE 分区、普通/通配/例外规则）计算公共后缀与可注册域名边界。
+  /// 当主机名非合法域名或不在已知 PSL 规则内时，返回 null（不回退猜“最后两段就是主域名”）。
+  static PublicSuffixMatch? inspectPublicSuffix(String rawHost) {
+    final trimmed = rawHost.trim().toLowerCase();
+    if (trimmed.isEmpty ||
+        trimmed.startsWith('.') ||
+        trimmed.endsWith('.') ||
+        trimmed.contains('..') ||
+        InternetAddress.tryParse(trimmed) != null) {
+      return null;
+    }
+    final encoded = _encodeDomainToAscii(trimmed);
+    if (encoded == null) return null;
+    return _OfflinePublicSuffixMatcher.match(encoded.asciiHost);
+  }
+
+  /// 校验是否为合法可排查域名（排除 IP、单标签及格式错误域名）。
+  static bool isValidHostname(String rawHost) {
+    final clean = rawHost.trim().toLowerCase();
+    if (clean.isEmpty ||
+        clean.startsWith('.') ||
+        clean.endsWith('.') ||
+        clean.contains('..') ||
+        InternetAddress.tryParse(clean) != null) {
+      return false;
+    }
+    final encoded = _encodeDomainToAscii(clean);
+    if (encoded == null || encoded.asciiHost.length > 253) return false;
+    return encoded.asciiHost.contains('.');
+  }
+
+  /// 判断域名是否为公共后缀（含单标签 TLD、多级 ICANN/PRIVATE 后缀与通配公共后缀）。
   static bool isPublicSuffix(String normalizedHost) {
     final host = normalizedHost.trim().toLowerCase();
     if (host.isEmpty || InternetAddress.tryParse(host) != null) {
@@ -325,41 +347,25 @@ class DomainInputParser {
     if (!host.contains('.')) {
       return true;
     }
-    return _multiLabelPublicSuffixes.contains(host);
+    final match = inspectPublicSuffix(host);
+    if (match == null) return false;
+    return match.isPublicSuffix;
   }
 
-  /// 计算可注册根域（eTLD+1）：
-  /// - u56112681.ct.sendgrid.net -> sendgrid.net
-  /// - a.b.example.co.uk -> example.co.uk
-  /// - api.service.com.au -> service.com.au
+  /// 计算可注册根域（eTLD+1）；若为公共后缀或 PSL 无法可靠判定规则边界，返回 null（绝不瞎猜最后两段）。
   static String? registrableDomain(String normalizedHost) {
-    final host = normalizedHost.trim().toLowerCase();
-    if (host.isEmpty || InternetAddress.tryParse(host) != null) {
+    final match = inspectPublicSuffix(normalizedHost);
+    if (match == null || !match.isKnownRule || match.isPublicSuffix) {
       return null;
     }
-    final labels = host.split('.');
-    if (labels.length < 2) return null;
-
-    // 匹配多级公共后缀（优先最长匹配）
-    for (var i = 0; i < labels.length; i++) {
-      final candidateSuffix = labels.sublist(i).join('.');
-      if (_multiLabelPublicSuffixes.contains(candidateSuffix)) {
-        if (i == 0) {
-          // 输入本身就是公共后缀（如 co.uk）
-          return null;
-        }
-        return labels.sublist(i - 1).join('.');
-      }
-    }
-
-    // 默认单标签 TLD：eTLD+1 为最后两段
-    return labels.sublist(labels.length - 2).join('.');
+    return match.registrableDomain;
   }
 
   /// 生成有边界的查询域名链（首项为原域名，随后为逐级父域名，停在可注册域名处）。
   ///
   /// - IP 地址直接返回仅含自身的列表，不展开父级；
   /// - 公共后缀与单标签 TLD 绝不进入结果列表；
+  /// - PSL 无法可靠判定边界的未知后缀域名仅检测原域名本身，不猜父级与主域；
   /// - 去重并受 [maxDepth] 限制，避免极深子域无限查询。
   static List<String> buildParentDomains(
     String normalizedHost, {
@@ -370,16 +376,27 @@ class DomainInputParser {
     if (InternetAddress.tryParse(clean) != null) {
       return <String>[clean];
     }
-    if (isPublicSuffix(clean)) {
+    final encoded = _encodeDomainToAscii(clean);
+    if (encoded == null) return const <String>[];
+    final asciiHost = encoded.asciiHost;
+    if (!asciiHost.contains('.') || isPublicSuffix(asciiHost)) {
       return const <String>[];
     }
 
-    final regDomain = registrableDomain(clean);
-    final labels = clean.split('.');
-    final out = <String>[clean];
-    final seen = <String>{clean};
+    final match = inspectPublicSuffix(asciiHost);
+    if (match == null || !match.isKnownRule || match.registrableDomain == null) {
+      // PSL 无法可靠确定可注册根域边界：仅保留当前域名自身，绝不猜测上级
+      return <String>[asciiHost];
+    }
 
-    var current = clean;
+    final regDomain = match.registrableDomain!;
+    final out = <String>[asciiHost];
+    final seen = <String>{asciiHost};
+    if (asciiHost == regDomain) {
+      return out;
+    }
+
+    var current = asciiHost;
     while (out.length < maxDepth) {
       final dotIdx = current.indexOf('.');
       if (dotIdx < 0) break;
@@ -387,7 +404,6 @@ class DomainInputParser {
       if (parent.isEmpty || isPublicSuffix(parent)) {
         break;
       }
-      // 停在可注册域；若输入层数过深尚未到达 regDomain 也止于 maxDepth
       if (seen.add(parent)) {
         out.add(parent);
       }
@@ -395,7 +411,6 @@ class DomainInputParser {
         break;
       }
       current = parent;
-      if (labels.length <= 2) break;
     }
     return out;
   }
@@ -512,5 +527,150 @@ class DomainInputParser {
     }
 
     return output.toString();
+  }
+}
+
+/// 离线 Public Suffix List 前缀树匹配器（与 `golang.org/x/net/publicsuffix` 数据表与算法一致）。
+/// 完整覆盖 ICANN / PRIVATE 分区、普通后缀、通配 `*` 后缀与 `!` 例外规则。
+class _OfflinePublicSuffixMatcher {
+  _OfflinePublicSuffixMatcher._();
+
+  static const int _notFound = -1;
+
+  static final String _text = ascii.decode(base64Decode(pslTextBase64.replaceAll('\n', '')));
+  static final Uint8List _nodes = base64Decode(pslNodesBase64.replaceAll('\n', ''));
+  static final Uint8List _children = base64Decode(pslChildrenBase64.replaceAll('\n', ''));
+
+  static int _getNode(int i) {
+    final off = i * 5;
+    return (_nodes[off] << 32) |
+        (_nodes[off + 1] << 24) |
+        (_nodes[off + 2] << 16) |
+        (_nodes[off + 3] << 8) |
+        _nodes[off + 4];
+  }
+
+  static int _getChild(int i) {
+    final off = i * 4;
+    return (_children[off] << 24) |
+        (_children[off + 1] << 16) |
+        (_children[off + 2] << 8) |
+        _children[off + 3];
+  }
+
+  static String _nodeLabel(int i) {
+    var x = _getNode(i);
+    final length = x & ((1 << pslNodesBitsTextLength) - 1);
+    x >>= pslNodesBitsTextLength;
+    final offset = x & ((1 << pslNodesBitsTextOffset) - 1);
+    return _text.substring(offset, offset + length);
+  }
+
+  static int _find(String label, int lo, int hi) {
+    var l = lo;
+    var h = hi;
+    while (l < h) {
+      final mid = l + ((h - l) >> 1);
+      final s = _nodeLabel(mid);
+      final cmp = s.compareTo(label);
+      if (cmp < 0) {
+        l = mid + 1;
+      } else if (cmp == 0) {
+        return mid;
+      } else {
+        h = mid;
+      }
+    }
+    return _notFound;
+  }
+
+  static PublicSuffixMatch match(String domain) {
+    var lo = 0;
+    var hi = pslNumTld;
+    var s = domain;
+    var suffix = domain.length;
+    var icann = false;
+    var icannNode = false;
+    var wildcard = false;
+    var matchedExplicitRule = false;
+
+    while (true) {
+      final dot = s.lastIndexOf('.');
+      if (wildcard) {
+        icann = icannNode;
+        suffix = 1 + dot;
+        matchedExplicitRule = true;
+      }
+      if (lo == hi) {
+        break;
+      }
+      final label = s.substring(1 + dot);
+      final f = _find(label, lo, hi);
+      if (f == _notFound) {
+        break;
+      }
+
+      var u = _getNode(f) >> (pslNodesBitsTextOffset + pslNodesBitsTextLength);
+      icannNode = (u & ((1 << pslNodesBitsIcann) - 1)) != 0;
+      u >>= pslNodesBitsIcann;
+      u = _getChild(u & ((1 << pslNodesBitsChildren) - 1));
+      lo = u & ((1 << pslChildrenBitsLo) - 1);
+      u >>= pslChildrenBitsLo;
+      hi = u & ((1 << pslChildrenBitsHi) - 1);
+      u >>= pslChildrenBitsHi;
+      final nodeType = u & ((1 << pslChildrenBitsNodeType) - 1);
+      if (nodeType == pslNodeTypeNormal) {
+        suffix = 1 + dot;
+        matchedExplicitRule = true;
+      } else if (nodeType == pslNodeTypeException) {
+        suffix = 1 + s.length;
+        matchedExplicitRule = true;
+        break;
+      }
+      u >>= pslChildrenBitsNodeType;
+      wildcard = (u & ((1 << pslChildrenBitsWildcard) - 1)) != 0;
+      if (!wildcard) {
+        icann = icannNode;
+      }
+
+      if (dot == -1) {
+        break;
+      }
+      s = s.substring(0, dot);
+    }
+
+    String resolvedSuffix;
+    bool isKnownRule;
+    if (suffix == domain.length || !matchedExplicitRule) {
+      // 未命中任何显式 ICANN/PRIVATE/通配/例外 PSL 规则，属于未知顶级域（不作为可信赖 PSL 边界）。
+      resolvedSuffix = domain.substring(1 + domain.lastIndexOf('.'));
+      isKnownRule = false;
+      icann = false;
+    } else {
+      resolvedSuffix = domain.substring(suffix);
+      isKnownRule = true;
+    }
+
+    final isSingleLabel = !domain.contains('.');
+    final isPs = isSingleLabel || (isKnownRule && domain.length <= resolvedSuffix.length);
+
+    String? regDomain;
+    if (isKnownRule && !isPs && domain.length > resolvedSuffix.length) {
+      final sepIdx = domain.length - resolvedSuffix.length - 1;
+      if (sepIdx > 0 && domain[sepIdx] == '.') {
+        final prevDot = domain.lastIndexOf('.', sepIdx - 1);
+        regDomain = domain.substring(1 + prevDot);
+      }
+    }
+
+    return PublicSuffixMatch(
+      version: pslVersion,
+      suffix: resolvedSuffix,
+      icann: icann,
+      isPrivate: isKnownRule && !icann,
+      isKnownRule: isKnownRule,
+      isPublicSuffix: isPs,
+      registrableDomain: regDomain,
+    );
   }
 }

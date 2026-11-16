@@ -8,6 +8,7 @@ class FilteringStatus {
   final List<Filter> filters;
   final List<Filter> whitelistFilters;
   List<String> userRules;
+  final String? userRulesRevision;
   final int interval;
   final bool enabled;
 
@@ -15,6 +16,7 @@ class FilteringStatus {
     required this.filters,
     required this.whitelistFilters,
     required this.userRules,
+    this.userRulesRevision,
     required this.interval,
     required this.enabled,
   });
@@ -23,6 +25,7 @@ class FilteringStatus {
     filters: json["filters"] != null ? List<Filter>.from(json["filters"].map((x) => Filter.fromJson(x))) : [],
     whitelistFilters: json["whitelist_filters"] != null ? List<Filter>.from(json["whitelist_filters"].map((x) => Filter.fromJson(x))) : [],
     userRules: json["user_rules"] != null ? List<String>.from(json["user_rules"].map((x) => x)) : [],
+    userRulesRevision: json["user_rules_revision"]?.toString(),
     interval: json["interval"],
     enabled: json["enabled"],
   );

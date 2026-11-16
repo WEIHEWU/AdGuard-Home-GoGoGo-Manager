@@ -5,10 +5,11 @@ import 'package:flutter/foundation.dart';
 
 import 'package:adguard_home_manager/models/filtering.dart';
 import 'package:adguard_home_manager/models/logs.dart';
+import 'package:adguard_home_manager/models/server.dart';
 import 'package:adguard_home_manager/services/api_client.dart';
 import 'package:adguard_home_manager/services/domain_input_parser.dart';
 
-/// 实时规则检测状态（严格区分查询失败/不支持与真实放行）。
+/// 实时规则检测状态（严格区分查询失败/不支持/未知结果、重写与真实放行）。
 enum RuleCheckStatus {
   blocked,
   whitelisted,
@@ -16,6 +17,7 @@ enum RuleCheckStatus {
   notBlocked,
   failed,
   unsupported,
+  unknown,
 }
 
 /// 命中规则条目及订阅来源名称映射结果。
@@ -74,6 +76,9 @@ class HostCheckResult {
   });
 
   bool get isBlocked => status == RuleCheckStatus.blocked;
+  bool get isUnblockedSuccess =>
+      status == RuleCheckStatus.whitelisted ||
+      status == RuleCheckStatus.notBlocked;
   bool get hasImportantBlock =>
       isBlocked && rules.any((r) => r.isImportant);
 
@@ -89,6 +94,10 @@ class HostCheckResult {
         return '未命中阻断规则';
       case RuleCheckStatus.unsupported:
         return '核心不支持该检测接口';
+      case RuleCheckStatus.unknown:
+        return rawReason.isNotEmpty
+            ? '未知检测结果（$rawReason）'
+            : '未知检测结果';
       case RuleCheckStatus.failed:
         return errorDetail != null && errorDetail!.isNotEmpty
             ? '查询失败（$errorDetail）'
@@ -99,6 +108,7 @@ class HostCheckResult {
   static RuleCheckStatus classifyReason(String reason) {
     switch (reason) {
       case 'FilteredBlackList':
+      case 'FilteredBlockList':
       case 'FilteredSafeBrowsing':
       case 'FilteredParental':
       case 'FilteredInvalid':
@@ -114,12 +124,11 @@ class HostCheckResult {
         return RuleCheckStatus.rewritten;
       case 'NotFilteredNotFound':
       case 'NotFilteredSNI':
-      case 'NotFilteredError':
         return RuleCheckStatus.notBlocked;
+      case 'NotFilteredError':
+        return RuleCheckStatus.failed;
       default:
-        return reason.startsWith('Filtered')
-            ? RuleCheckStatus.blocked
-            : RuleCheckStatus.notBlocked;
+        return RuleCheckStatus.unknown;
     }
   }
 
@@ -229,13 +238,22 @@ class HostCheckResult {
       addRule(legacyRule, legacyId);
     }
 
+    final status = classifyReason(reason);
+    String? reasonDetail;
+    if (status == RuleCheckStatus.failed) {
+      reasonDetail = '核心返回错误状态 ($reason)';
+    } else if (status == RuleCheckStatus.unknown) {
+      reasonDetail = '核心返回未知状态 ($reason)';
+    }
+
     return HostCheckResult(
       host: host,
       isOriginal: isOriginal,
-      status: classifyReason(reason),
+      status: status,
       rawReason: reason,
       rules: parsedRules,
       qtype: qtype,
+      errorDetail: reasonDetail,
     );
   }
 
@@ -267,11 +285,21 @@ class HostFamilyCheckReport {
   HostCheckResult get effectiveOriginal {
     final aaaa = originalAAAA;
     if (aaaa == null) return originalA;
-    // 若 A 未命中而 AAAA 阻断/重写，合并显示并保留各自记录类型提示
-    if (originalA.status == RuleCheckStatus.notBlocked &&
-        (aaaa.status == RuleCheckStatus.blocked ||
-            aaaa.status == RuleCheckStatus.rewritten ||
-            aaaa.status == RuleCheckStatus.whitelisted)) {
+    final diffNote = 'A=${originalA.statusLabel}, AAAA=${aaaa.statusLabel}';
+
+    // 任一阻断：优先突出展示被阻断的记录类型与命中规则
+    if (originalA.isBlocked) {
+      return HostCheckResult(
+        host: originalA.host,
+        isOriginal: true,
+        status: originalA.status,
+        rawReason: originalA.rawReason,
+        rules: originalA.rules,
+        qtype: 'A',
+        secondaryQtypeNote: originalA.status == aaaa.status ? null : diffNote,
+      );
+    }
+    if (aaaa.isBlocked) {
       return HostCheckResult(
         host: aaaa.host,
         isOriginal: true,
@@ -279,12 +307,38 @@ class HostFamilyCheckReport {
         rawReason: aaaa.rawReason,
         rules: aaaa.rules,
         qtype: 'AAAA',
-        secondaryQtypeNote: 'A=${originalA.statusLabel}, AAAA=${aaaa.statusLabel}',
+        secondaryQtypeNote: diffNote,
       );
     }
-    if (originalA.status != aaaa.status &&
-        aaaa.status != RuleCheckStatus.failed &&
-        aaaa.status != RuleCheckStatus.unsupported) {
+
+    // 保留重写独立语义
+    if (originalA.status == RuleCheckStatus.rewritten) {
+      return HostCheckResult(
+        host: originalA.host,
+        isOriginal: true,
+        status: originalA.status,
+        rawReason: originalA.rawReason,
+        rules: originalA.rules,
+        qtype: 'A',
+        secondaryQtypeNote: originalA.status == aaaa.status ? null : diffNote,
+      );
+    }
+    if (aaaa.status == RuleCheckStatus.rewritten) {
+      return HostCheckResult(
+        host: aaaa.host,
+        isOriginal: true,
+        status: aaaa.status,
+        rawReason: aaaa.rawReason,
+        rules: aaaa.rules,
+        qtype: 'AAAA',
+        secondaryQtypeNote: diffNote,
+      );
+    }
+
+    // 任一失败、不支持或未知：绝不伪装成完全正常的未阻断
+    if (originalA.status == RuleCheckStatus.failed ||
+        originalA.status == RuleCheckStatus.unsupported ||
+        originalA.status == RuleCheckStatus.unknown) {
       return HostCheckResult(
         host: originalA.host,
         isOriginal: true,
@@ -292,7 +346,34 @@ class HostFamilyCheckReport {
         rawReason: originalA.rawReason,
         rules: originalA.rules,
         qtype: originalA.qtype,
-        secondaryQtypeNote: 'A=${originalA.statusLabel}, AAAA=${aaaa.statusLabel}',
+        errorDetail: originalA.errorDetail,
+        secondaryQtypeNote: originalA.status == aaaa.status ? null : diffNote,
+      );
+    }
+    if (aaaa.status == RuleCheckStatus.failed ||
+        aaaa.status == RuleCheckStatus.unsupported ||
+        aaaa.status == RuleCheckStatus.unknown) {
+      return HostCheckResult(
+        host: aaaa.host,
+        isOriginal: true,
+        status: aaaa.status,
+        rawReason: aaaa.rawReason,
+        rules: aaaa.rules,
+        qtype: 'AAAA',
+        errorDetail: aaaa.errorDetail,
+        secondaryQtypeNote: diffNote,
+      );
+    }
+
+    if (originalA.status != aaaa.status) {
+      return HostCheckResult(
+        host: originalA.host,
+        isOriginal: true,
+        status: originalA.status,
+        rawReason: originalA.rawReason,
+        rules: originalA.rules,
+        qtype: originalA.qtype,
+        secondaryQtypeNote: diffNote,
       );
     }
     return originalA;
@@ -772,9 +853,7 @@ class WhitelistPlanner {
     if (trimmed.startsWith('@@') || trimmed.startsWith('!') || trimmed.startsWith('#')) {
       return null;
     }
-    // 拒绝正则 /.../
     if (trimmed.startsWith('/')) return null;
-    // 拒绝通配符 * 或路径 / ? =
     final dollarIdx = trimmed.indexOf(r'$');
     final body = dollarIdx >= 0 ? trimmed.substring(0, dollarIdx) : trimmed;
     if (body.contains('*') || body.contains('/')) return null;
@@ -783,27 +862,23 @@ class WhitelistPlanner {
     if (m == null) return null;
 
     final candidate = (m.group(1) ?? '').toLowerCase();
-    if (candidate.isEmpty ||
-        candidate.contains('..') ||
-        DomainInputParser.isPublicSuffix(candidate) ||
-        InternetAddress.tryParse(candidate) != null) {
+    if (!DomainInputParser.isValidHostname(candidate) ||
+        DomainInputParser.isPublicSuffix(candidate)) {
       return null;
     }
-    if (!candidate.contains('.')) return null;
 
-    // 若携带 $modifiers，检查不包含改变规则语义到纯改写的选项以外也允许提取（仅 $important/$third-party 等正常阻断修饰）
     return candidate;
   }
 
-  /// 基于原域名与实际命中规则生成两级加白方案。
+  /// 基于原域名、离线 PSL 边界与实际命中规则生成两级加白方案。
   static WhitelistSuggestion buildSuggestion({
     required String originalHost,
     required List<MatchedRuleInfo> matchedRules,
   }) {
     final cleanHost = originalHost.trim().toLowerCase();
-    final isValidNonSuffixHost = cleanHost.isNotEmpty &&
-        !DomainInputParser.isPublicSuffix(cleanHost) &&
-        InternetAddress.tryParse(cleanHost) == null;
+    final hostPsl = DomainInputParser.inspectPublicSuffix(cleanHost);
+    final isValidNonSuffixHost = DomainInputParser.isValidHostname(cleanHost) &&
+        !DomainInputParser.isPublicSuffix(cleanHost);
 
     final narrowTarget = isValidNonSuffixHost ? cleanHost : null;
     final narrowRule = narrowTarget != null ? '@@||$narrowTarget^' : null;
@@ -812,20 +887,38 @@ class WhitelistPlanner {
         : '上级域名';
     final narrowDesc = narrowTarget != null
         ? '放行此域名及其下级域名，不放行 $parentHint 下的其他兄弟子域名'
-        : '当前地址为 IP 或公共后缀，不提供子域名放行规则';
+        : '当前地址无效、为 IP 或公共后缀，不提供子域名放行规则';
 
     final matchedImportant = matchedRules.any((r) => r.isImportant);
     String? broadTarget;
     String? broadDisabledReason;
 
-    if (matchedRules.isEmpty) {
+    if (hostPsl == null || !hostPsl.isKnownRule || hostPsl.registrableDomain == null) {
+      broadDisabledReason =
+          '离线 PSL 无法可靠判定当前域名的可注册边界，已禁用宽范围加白（不回退猜最后两段）';
+    } else if (matchedRules.isEmpty) {
       broadDisabledReason = '未检测到可解析的具体阻断规则文本，不能生成宽范围规则放行建议';
     } else {
       final candidates = <String>[];
       for (final r in matchedRules) {
         final ext = extractSafeAnchorDomain(r.text);
         if (ext == null) {
-          broadDisabledReason ??= '命中的规则含正则、通配符、路径或公共后缀 (${r.text})，无法安全解析为单一宽范围域名';
+          broadDisabledReason ??=
+              '命中的规则含正则、通配符、路径、公共后缀或无效域名 (${r.text})，无法安全解析为单一宽范围域名';
+          continue;
+        }
+        final candPsl = DomainInputParser.inspectPublicSuffix(ext);
+        if (candPsl == null || !candPsl.isKnownRule || candPsl.isPublicSuffix) {
+          broadDisabledReason ??=
+              '命中规则域名 ($ext) 为公共后缀或无法通过 PSL 可靠判定边界，已禁用宽范围放行';
+          continue;
+        }
+        // 严格包含关系校验：目标必须等于原域名或为原域名的祖先（原域名以 "." + cand 结尾）
+        final isAncestorOrSame =
+            cleanHost == ext || cleanHost.endsWith('.$ext');
+        if (!isAncestorOrSame) {
+          broadDisabledReason ??=
+              '命中规则域名 ($ext) 与当前域名 ($cleanHost) 无层级包含关系，不从无关规则生成宽范围建议';
           continue;
         }
         if (!candidates.contains(ext)) {
@@ -842,9 +935,9 @@ class WhitelistPlanner {
           broadDisabledReason = null;
         }
       } else if (candidates.length > 1) {
-        // 多条可解析规则时选择与原域名共享的最窄非原域规则，绝不扩大成可注册根域
         final others = candidates.where((c) => c != cleanHost).toList();
         if (others.isNotEmpty) {
+          // 优先选择最窄的非当前域名规则（长度最长），不主动扩大至可注册根域
           others.sort((a, b) => b.length.compareTo(a.length));
           broadTarget = others.first;
           broadDisabledReason = null;
@@ -872,54 +965,160 @@ class WhitelistPlanner {
   }
 }
 
-/// 写入并核验例外的完整结果（明确区分：写后确认生效 / 仍被 $important 阻断 / 写后核验失败 / 写入失败）。
+/// 规则状态与本地变更历史追踪（按服务器隔离的共享写入队列，防止多页面/多协调器互相覆盖）。
+/// 说明：同一台服务器上的不同客户端（如 Web UI 或另一台手机）并发修改需依赖核心的
+/// `expected_revision` 条件更新检测（旧核心不返回 `user_rules_revision` 时仅做尽力防误删检查）。
+class ServerRuleWriteQueue {
+  ServerRuleWriteQueue._();
+
+  static final Map<String, _ServerQueueState> _queues =
+      <String, _ServerQueueState>{};
+
+  static String serverKeyFor(Server server) {
+    final normDomain = server.domain.trim().toLowerCase();
+    final normPath = (server.path ?? '').trim();
+    return '${server.id}|${server.connectionMethod.toLowerCase()}|$normDomain|${server.port ?? ""}|$normPath';
+  }
+
+  static String fingerprintRules(List<String> rules) {
+    final buf = StringBuffer('${rules.length}#');
+    for (final r in rules) {
+      buf
+        ..write(r.length)
+        ..write(':')
+        ..write(r)
+        ..write('\n');
+    }
+    return buf.toString();
+  }
+
+  static _ServerQueueState _stateFor(Server server) {
+    final key = serverKeyFor(server);
+    return _queues.putIfAbsent(key, () => _ServerQueueState());
+  }
+
+  /// 在指定服务器的共享串行队列中执行规则读写操作；不同服务器之间完全并发互不阻塞；
+  /// 前序任务抛错后队列自动恢复，不会卡死后续任务。
+  static Future<T> run<T>(
+    Server server,
+    Future<T> Function(ServerQueueSession session) fn,
+  ) {
+    final key = serverKeyFor(server);
+    final st = _stateFor(server);
+    final completer = Completer<T>();
+
+    st.tail = st.tail.catchError((_) {}).then((_) async {
+      try {
+        final session = ServerQueueSession._(serverKey: key, state: st);
+        completer.complete(await fn(session));
+      } catch (e, stTrace) {
+        completer.completeError(e, stTrace);
+      }
+    });
+
+    return completer.future;
+  }
+
+  static int currentLocalEpoch(Server server) => _stateFor(server).localEpoch;
+
+  @visibleForTesting
+  static void resetForTest() {
+    _queues.clear();
+  }
+}
+
+class _ServerQueueState {
+  Future<void> tail = Future<void>.value();
+  int localEpoch = 0;
+}
+
+class ServerQueueSession {
+  final String serverKey;
+  final _ServerQueueState _state;
+
+  const ServerQueueSession._({
+    required this.serverKey,
+    required _ServerQueueState state,
+  }) : _state = state;
+
+  int get localEpoch => _state.localEpoch;
+
+  int bumpLocalEpoch() {
+    _state.localEpoch++;
+    return _state.localEpoch;
+  }
+}
+
+/// 可核验的例外规则新增凭证：用于撤销前证明目标规则仍属于该次操作而非用户删改后同文本重加。
+class ExceptionUndoToken {
+  final String serverKey;
+  final String rule;
+  final int addedIndex;
+  final String? confirmedRevision;
+  final String confirmedRulesFingerprint;
+  final int confirmedLocalEpoch;
+
+  const ExceptionUndoToken({
+    required this.serverKey,
+    required this.rule,
+    required this.addedIndex,
+    required this.confirmedRevision,
+    required this.confirmedRulesFingerprint,
+    required this.confirmedLocalEpoch,
+  });
+}
+
+/// 写入并核验例外的完整结果。
 class ExceptionWriteOutcome {
   final bool writeSucceeded;
   final bool verifiedUnblocked;
   final bool stillBlockedByImportant;
+  final bool verificationIncomplete;
+  final bool cacheFlushFailed;
+  final bool conflictDetected;
   final String? addedRule;
+  final ExceptionUndoToken? undoToken;
   final HostCheckResult? postCheckResult;
+  final HostCheckResult? postCheckA;
+  final HostCheckResult? postCheckAAAA;
   final String message;
 
   const ExceptionWriteOutcome({
     required this.writeSucceeded,
     required this.verifiedUnblocked,
     this.stillBlockedByImportant = false,
+    this.verificationIncomplete = false,
+    this.cacheFlushFailed = false,
+    this.conflictDetected = false,
     this.addedRule,
+    this.undoToken,
     this.postCheckResult,
+    this.postCheckA,
+    this.postCheckAAAA,
     required this.message,
   });
 }
 
 /// 安全的例外规则写入与撤销协调器：
-/// - 串行互斥锁防止并发写丢失其他用户规则；
-/// - 写入前实时读取 `/filtering/status` 的 `user_rules`，原样保留全部既有规则顺序与注释，仅追加新增例外；
-/// - 绝不静默删改已有拦截规则，也绝不自动加 `$important`；
-/// - 写入后回读 `/filtering/status` 确认持久化、刷新核心与系统 DNS 缓存，再调用 `/filtering/check_host` 真实核验是否解除阻断。
+/// - 通过按服务器隔离的 [ServerRuleWriteQueue] 与普通规则编辑入口共享同一写队列，避免交叉覆盖；
+/// - 支持核心 `expected_revision` 条件更新，检测外部客户端并发修改冲突并重新拉取最新规则；
+/// - 写后完整核验 A 与 AAAA，区分确认放行 / 仍被阻断 / 核验不完整 / 重写 / 缓存刷新部分失败；
+/// - 仅在能够证明归属时执行撤销，绝不猜测删除用户规则。
 class ExceptionRuleCoordinator {
-  Future<void> _writeTail = Future<void>.value();
+  final Map<String, ExceptionUndoToken> _lastTokensByRuleKey =
+      <String, ExceptionUndoToken>{};
 
-  Future<T> _serialized<T>(Future<T> Function() fn) {
-    final completer = Completer<T>();
-    _writeTail = _writeTail.catchError((_) {}).then((_) async {
-      try {
-        completer.complete(await fn());
-      } catch (e, st) {
-        completer.completeError(e, st);
-      }
-    });
-    return completer.future;
-  }
+  static String _tokenKey(String serverKey, String rule) => '$serverKey\x00$rule';
 
   Future<ExceptionWriteOutcome> applyExceptionAndVerify({
     required ApiClientV2 apiClient,
     required String verifyHost,
     required String exceptionRule,
-    Future<void> Function()? flushSystemDnsCache,
+    FutureOr<Object?> Function()? flushSystemDnsCache,
     Map<int, String> filterNames = const {},
     Map<int, String> whitelistNames = const {},
   }) {
-    return _serialized(() async {
+    return ServerRuleWriteQueue.run(apiClient.server, (session) async {
       final cleanRule = exceptionRule.trim();
       if (cleanRule.isEmpty) {
         return const ExceptionWriteOutcome(
@@ -929,7 +1128,7 @@ class ExceptionRuleCoordinator {
         );
       }
 
-      // 1) 获取当前最新 user_rules，避免覆盖或丢失既有规则
+      // 1) 排到本服务器写队列后再重读最新规则与版本，绝不使用排队前旧列表
       final beforeFiltering = await apiClient.getFiltering();
       if (!beforeFiltering.successful || beforeFiltering.content is! Filtering) {
         return const ExceptionWriteOutcome(
@@ -942,14 +1141,27 @@ class ExceptionRuleCoordinator {
       final existingRules = List<String>.from(filteringData.userRules);
       final alreadyExists = existingRules.any((r) => r.trim() == cleanRule);
 
-      final updatedRules = List<String>.from(existingRules);
       String? addedRule;
+      ExceptionUndoToken? undoToken;
       if (!alreadyExists) {
-        updatedRules.add(cleanRule);
-        addedRule = cleanRule;
+        final updatedRules = List<String>.from(existingRules)..add(cleanRule);
+        final addedIdx = existingRules.length;
 
-        final setRes = await apiClient.setCustomRules(rules: updatedRules);
+        final setRes = await apiClient.setCustomRules(
+          rules: updatedRules,
+          expectedRevision: filteringData.userRulesRevision,
+        );
         if (!setRes.successful) {
+          if (setRes.statusCode == 409) {
+            // 外部客户端在读写窗口间并发修改了规则：立即重读刷新并返回明确冲突提示
+            await apiClient.getFiltering();
+            return const ExceptionWriteOutcome(
+              writeSucceeded: false,
+              verifiedUnblocked: false,
+              conflictDetected: true,
+              message: '检测到其他客户端同时修改了自定义规则（版本冲突），已重新读取最新列表，请确认后重试',
+            );
+          }
           return const ExceptionWriteOutcome(
             writeSucceeded: false,
             verifiedUnblocked: false,
@@ -957,37 +1169,68 @@ class ExceptionRuleCoordinator {
           );
         }
 
-        // 2) 回读 /filtering/status 确认核心确实已应用该规则
+        final newEpoch = session.bumpLocalEpoch();
+
+        // 2) 回读 /filtering/status 确认持久化与新版本号
         final confirmRes = await apiClient.getFiltering();
         if (!confirmRes.successful || confirmRes.content is! Filtering) {
           return ExceptionWriteOutcome(
             writeSucceeded: true,
             verifiedUnblocked: false,
-            addedRule: addedRule,
-            message: '规则已提交，但回读确认核心状态失败，请手动检查',
+            verificationIncomplete: true,
+            addedRule: cleanRule,
+            message: '规则已提交，但回读确认核心状态失败，无法建立安全撤销凭证，请手动检查',
           );
         }
-        final persisted = (confirmRes.content as Filtering)
-            .userRules
-            .any((r) => r.trim() == cleanRule);
-        if (!persisted) {
+        final confirmedData = confirmRes.content as Filtering;
+        final confirmedRules = List<String>.from(confirmedData.userRules);
+        final matchesInserted = addedIdx < confirmedRules.length &&
+            confirmedRules[addedIdx].trim() == cleanRule &&
+            confirmedRules.length == updatedRules.length;
+        final containsRule = confirmedRules.any((r) => r.trim() == cleanRule);
+        if (!containsRule) {
           return const ExceptionWriteOutcome(
             writeSucceeded: false,
             verifiedUnblocked: false,
             message: '核心状态回读未包含新增规则，写入未生效',
           );
         }
+
+        addedRule = cleanRule;
+        if (matchesInserted) {
+          undoToken = ExceptionUndoToken(
+            serverKey: session.serverKey,
+            rule: cleanRule,
+            addedIndex: addedIdx,
+            confirmedRevision: confirmedData.userRulesRevision,
+            confirmedRulesFingerprint:
+                ServerRuleWriteQueue.fingerprintRules(confirmedRules),
+            confirmedLocalEpoch: newEpoch,
+          );
+          _lastTokensByRuleKey[_tokenKey(session.serverKey, cleanRule)] =
+              undoToken;
+        }
       }
 
-      // 3) 清理核心 DNS 缓存与 Android 系统缓存
-      await apiClient.resetDnsCache();
+      // 3) 清理核心 DNS 缓存与 Android 系统缓存（失败按部分完成实报）
+      var cacheFlushFailed = false;
+      final resetRes = await apiClient.resetDnsCache();
+      if (!resetRes.successful) {
+        cacheFlushFailed = true;
+      }
       if (flushSystemDnsCache != null) {
-        await flushSystemDnsCache();
-      } else if (Platform.isAndroid) {
-        // 默认由外部调用方传入 ModuleConfigService().flushSystemDnsCache，保持核心协调器可测解耦
+        try {
+          final sysRes = await flushSystemDnsCache();
+          if (sysRes == false) {
+            cacheFlushFailed = true;
+          }
+        } catch (_) {
+          cacheFlushFailed = true;
+        }
       }
 
-      // 4) 用 /filtering/check_host 重新检测原域名（检查 A 与 AAAA）
+      // 4) 分别检查原域名的 A 与 AAAA 记录，任何一项失败/超时/未知/不支持都如实报告核验不完整
+      final isIp = InternetAddress.tryParse(verifyHost.trim()) != null;
       final checkA = await apiClient.checkHostFiltered(host: verifyHost, qtype: 'A');
       final resA = HostCheckResult.fromApiResponse(
         host: verifyHost,
@@ -998,12 +1241,11 @@ class ExceptionRuleCoordinator {
         whitelistNames: whitelistNames,
       );
 
-      HostCheckResult effective = resA;
-      if (resA.status == RuleCheckStatus.notBlocked ||
-          resA.status == RuleCheckStatus.whitelisted) {
+      HostCheckResult? resAAAA;
+      if (!isIp) {
         final checkAAAA =
             await apiClient.checkHostFiltered(host: verifyHost, qtype: 'AAAA');
-        final resAAAA = HostCheckResult.fromApiResponse(
+        resAAAA = HostCheckResult.fromApiResponse(
           host: verifyHost,
           response: checkAAAA,
           isOriginal: true,
@@ -1011,81 +1253,207 @@ class ExceptionRuleCoordinator {
           filterNames: filterNames,
           whitelistNames: whitelistNames,
         );
-        if (resAAAA.isBlocked) {
-          effective = resAAAA;
-        }
       }
 
-      if (effective.status == RuleCheckStatus.whitelisted ||
-          effective.status == RuleCheckStatus.notBlocked) {
-        return ExceptionWriteOutcome(
-          writeSucceeded: true,
-          verifiedUnblocked: true,
-          addedRule: addedRule,
-          postCheckResult: effective,
-          message: '放行已生效（已断开的旧 SNI 连接无法自动恢复，请重新点击原链接触发新连接）',
+      final blockedList = <HostCheckResult>[
+        if (resA.isBlocked) resA,
+        if (resAAAA != null && resAAAA.isBlocked) resAAAA,
+      ];
+      if (blockedList.isNotEmpty) {
+        final blockedTypes = blockedList.map((e) => e.qtype).join(' / ');
+        final primary = blockedList.firstWhere(
+          (e) => e.hasImportantBlock,
+          orElse: () => blockedList.first,
         );
-      }
-
-      if (effective.isBlocked) {
-        if (effective.hasImportantBlock) {
+        final topRule = primary.rules.isNotEmpty
+            ? primary.rules.first.text
+            : primary.rawReason;
+        if (blockedList.any((e) => e.hasImportantBlock)) {
           return ExceptionWriteOutcome(
             writeSucceeded: true,
             verifiedUnblocked: false,
             stillBlockedByImportant: true,
+            cacheFlushFailed: cacheFlushFailed,
             addedRule: addedRule,
-            postCheckResult: effective,
-            message: '规则已写入，但原域名仍被带 \$important 优先级规则阻断（普通例外无法覆盖）',
+            undoToken: undoToken,
+            postCheckResult: primary,
+            postCheckA: resA,
+            postCheckAAAA: resAAAA,
+            message:
+                '规则已写入，但 $blockedTypes 仍被带 \$important 优先级规则阻断（$topRule）',
           );
         }
-        final topRule =
-            effective.rules.isNotEmpty ? effective.rules.first.text : effective.rawReason;
         return ExceptionWriteOutcome(
           writeSucceeded: true,
           verifiedUnblocked: false,
+          cacheFlushFailed: cacheFlushFailed,
           addedRule: addedRule,
-          postCheckResult: effective,
-          message: '规则已写入，但实时检测仍被规则阻断：$topRule',
+          undoToken: undoToken,
+          postCheckResult: primary,
+          postCheckA: resA,
+          postCheckAAAA: resAAAA,
+          message: '规则已写入，但 $blockedTypes 实时检测仍被阻断：$topRule',
         );
       }
 
+      if (resA.status == RuleCheckStatus.rewritten ||
+          resAAAA?.status == RuleCheckStatus.rewritten) {
+        final rw =
+            resA.status == RuleCheckStatus.rewritten ? resA : resAAAA!;
+        return ExceptionWriteOutcome(
+          writeSucceeded: true,
+          verifiedUnblocked: false,
+          verificationIncomplete: false,
+          cacheFlushFailed: cacheFlushFailed,
+          addedRule: addedRule,
+          undoToken: undoToken,
+          postCheckResult: rw,
+          postCheckA: resA,
+          postCheckAAAA: resAAAA,
+          message:
+              '规则已提交，但 ${rw.qtype} 命中重写规则处理（${rw.rawReason}），不等于正常放行',
+        );
+      }
+
+      final bothConfirmedUnblocked = resA.isUnblockedSuccess &&
+          (resAAAA == null || resAAAA.isUnblockedSuccess);
+      if (bothConfirmedUnblocked) {
+        const caveat =
+            '注意：规则检测通过不保证邮件跳转、服务器或日历应用本身一定可用；已断开的 SNI 连接需要重新触发';
+        if (cacheFlushFailed) {
+          return ExceptionWriteOutcome(
+            writeSucceeded: true,
+            verifiedUnblocked: true,
+            cacheFlushFailed: true,
+            addedRule: addedRule,
+            undoToken: undoToken,
+            postCheckResult: resA,
+            postCheckA: resA,
+            postCheckAAAA: resAAAA,
+            message: '规则检测确认放行，但 DNS 缓存刷新失败（部分完成，请稍候或手动切换网络清缓存）。$caveat',
+          );
+        }
+        return ExceptionWriteOutcome(
+          writeSucceeded: true,
+          verifiedUnblocked: true,
+          cacheFlushFailed: false,
+          addedRule: addedRule,
+          undoToken: undoToken,
+          postCheckResult: resA,
+          postCheckA: resA,
+          postCheckAAAA: resAAAA,
+          message: '规则检测确认放行。$caveat',
+        );
+      }
+
+      final incompleteRes = !resA.isUnblockedSuccess ? resA : resAAAA!;
+      final statusSummary = resAAAA != null
+          ? 'A=${resA.statusLabel}，AAAA=${resAAAA.statusLabel}'
+          : 'A=${resA.statusLabel}';
       return ExceptionWriteOutcome(
         writeSucceeded: true,
         verifiedUnblocked: false,
+        verificationIncomplete: true,
+        cacheFlushFailed: cacheFlushFailed,
         addedRule: addedRule,
-        postCheckResult: effective,
-        message: '规则已写入，但写后核验未能确认（${effective.statusLabel}）',
+        undoToken: undoToken,
+        postCheckResult: incompleteRes,
+        postCheckA: resA,
+        postCheckAAAA: resAAAA,
+        message: '规则已提交，但核验不完整（$statusSummary），请手动确认或重试检测',
       );
     });
   }
 
-  /// 精准撤销本次操作明确添加的那条例外规则，绝不误删用户此前已有的任何规则。
+  /// 精准撤销本次操作可证明归属的例外规则；规则状态变化、用户删除后重加或跨服务器均拒绝猜测删除。
   Future<({bool ok, String message})> undoAddedException({
     required ApiClientV2 apiClient,
     required String addedRule,
-    Future<void> Function()? flushSystemDnsCache,
+    ExceptionUndoToken? undoToken,
+    FutureOr<Object?> Function()? flushSystemDnsCache,
   }) {
-    return _serialized(() async {
+    return ServerRuleWriteQueue.run(apiClient.server, (session) async {
       final clean = addedRule.trim();
+      final token = undoToken ??
+          _lastTokensByRuleKey[_tokenKey(session.serverKey, clean)];
+      if (token == null) {
+        return (
+          ok: false,
+          message: '未找到本次操作的可核验归属记录（可能规则此前已存在或已被消耗），已拒绝猜测删除，请手动检查',
+        );
+      }
+      if (token.serverKey != session.serverKey || token.rule != clean) {
+        return (
+          ok: false,
+          message: '撤销目标与当前服务器或规则记录不匹配，已拒绝修改',
+        );
+      }
+
       final res = await apiClient.getFiltering();
       if (!res.successful || res.content is! Filtering) {
         return (ok: false, message: '读取当前自定义规则失败，未能撤销');
       }
-      final current = List<String>.from((res.content as Filtering).userRules);
-      // 仅删除最后一次匹配的该条规则（保留任何用户原有规则与顺序）
-      final idx = current.lastIndexWhere((r) => r.trim() == clean);
-      if (idx < 0) {
-        return (ok: true, message: '规则已不存在，无需重复撤销');
-      }
-      current.removeAt(idx);
+      final filteringData = res.content as Filtering;
+      final current = List<String>.from(filteringData.userRules);
 
-      final saveRes = await apiClient.setCustomRules(rules: current);
+      if (!current.any((r) => r.trim() == clean)) {
+        _lastTokensByRuleKey.remove(_tokenKey(session.serverKey, clean));
+        return (
+          ok: false,
+          message: '规则已不在当前列表中（可能已被手动删除），未修改任何其他规则',
+        );
+      }
+
+      final currentFp = ServerRuleWriteQueue.fingerprintRules(current);
+      final idxInBounds = token.addedIndex >= 0 &&
+          token.addedIndex < current.length &&
+          current[token.addedIndex].trim() == clean;
+
+      bool ownershipProven;
+      if (token.confirmedRevision != null) {
+        ownershipProven = filteringData.userRulesRevision == token.confirmedRevision &&
+            currentFp == token.confirmedRulesFingerprint &&
+            idxInBounds;
+      } else {
+        // 旧核心无 user_rules_revision：严格比对完整规则快照与本客户端局部修改代数
+        ownershipProven = session.localEpoch == token.confirmedLocalEpoch &&
+            currentFp == token.confirmedRulesFingerprint &&
+            idxInBounds;
+      }
+
+      if (!ownershipProven) {
+        _lastTokensByRuleKey.remove(_tokenKey(session.serverKey, clean));
+        return (
+          ok: false,
+          message:
+              '规则状态在新增后已发生变化（可能被删除后重新添加或外部编辑），无法证明归属，已拒绝猜测删除，请手动检查自定义规则',
+        );
+      }
+
+      final updated = List<String>.from(current)..removeAt(token.addedIndex);
+      final saveRes = await apiClient.setCustomRules(
+        rules: updated,
+        expectedRevision: filteringData.userRulesRevision,
+      );
       if (!saveRes.successful) {
+        if (saveRes.statusCode == 409) {
+          await apiClient.getFiltering();
+          return (
+            ok: false,
+            message: '撤销时检测到外部客户端并发修改冲突，已刷新最新规则列表，请手动检查',
+          );
+        }
         return (ok: false, message: '撤销保存失败，请重试');
       }
+
+      session.bumpLocalEpoch();
+      _lastTokensByRuleKey.remove(_tokenKey(session.serverKey, clean));
+
       await apiClient.resetDnsCache();
       if (flushSystemDnsCache != null) {
-        await flushSystemDnsCache();
+        try {
+          await flushSystemDnsCache();
+        } catch (_) {}
       }
       return (ok: true, message: '已撤销本次新增的例外规则：$clean');
     });

@@ -137,6 +137,7 @@ class Filtering {
   List<Filter> whitelistFilters;
   List<String> _userRules;
   PrecomputedCustomRules _precomputedCustomRules;
+  final String? userRulesRevision;
   List<String> blockedServices;
   int interval;
   bool enabled;
@@ -145,6 +146,7 @@ class Filtering {
     required this.filters,
     required this.whitelistFilters,
     required List<String> userRules,
+    this.userRulesRevision,
     required this.blockedServices,
     required this.interval,
     required this.enabled,
@@ -177,6 +179,7 @@ class Filtering {
               json["whitelist_filters"].map((x) => Filter.fromJson(x)))
           : [],
       userRules: parsedUserRules,
+      userRulesRevision: json["user_rules_revision"]?.toString(),
       precomputedCustomRules:
           PrecomputedCustomRules.fromRawRules(parsedUserRules),
       blockedServices: json["blocked_services"] != null

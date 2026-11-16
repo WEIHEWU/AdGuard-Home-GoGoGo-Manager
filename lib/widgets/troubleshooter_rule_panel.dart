@@ -37,6 +37,7 @@ class LiveRuleDiagnosticCard extends StatelessWidget {
       case RuleCheckStatus.notBlocked:
         return Colors.teal;
       case RuleCheckStatus.unsupported:
+      case RuleCheckStatus.unknown:
       case RuleCheckStatus.failed:
         return Colors.orange.shade800;
     }
@@ -419,9 +420,13 @@ class _OutcomeStatusRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = outcome.verifiedUnblocked
+    final fullSuccess = outcome.verifiedUnblocked && !outcome.cacheFlushFailed;
+    final color = fullSuccess
         ? Colors.green.shade800
-        : (outcome.stillBlockedByImportant
+        : ((outcome.verifiedUnblocked ||
+                outcome.verificationIncomplete ||
+                outcome.stillBlockedByImportant ||
+                outcome.conflictDetected)
             ? Colors.orange.shade900
             : Colors.red.shade700);
     return Padding(

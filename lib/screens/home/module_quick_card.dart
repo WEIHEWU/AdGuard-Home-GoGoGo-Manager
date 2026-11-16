@@ -1271,7 +1271,7 @@ class _FalsePositiveAssistantModalState
     showSnackbar(
       appConfigProvider: appConfigProvider,
       label: outcome.message,
-      color: outcome.verifiedUnblocked
+      color: outcome.verifiedUnblocked && !outcome.cacheFlushFailed
           ? Colors.green
           : (outcome.writeSucceeded ? Colors.orange : Colors.red),
     );
@@ -1289,9 +1289,11 @@ class _FalsePositiveAssistantModalState
     if (api == null) return;
 
     setState(() => _writingException = true);
+    final token = _exceptionOutcomes[addedRule]?.undoToken;
     final res = await _exceptionCoordinator.undoAddedException(
       apiClient: api,
       addedRule: addedRule,
+      undoToken: token,
       flushSystemDnsCache: () => ModuleConfigService().flushSystemDnsCache(),
     );
     await filteringProvider.fetchFilters(showLoading: false);

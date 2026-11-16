@@ -4,8 +4,14 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:adguard_home_manager/models/dns_statistics.dart';
 import 'package:adguard_home_manager/models/logs.dart';
+import 'package:adguard_home_manager/models/filtering_status.dart' as fs;
 import 'package:adguard_home_manager/models/server.dart';
+import 'package:adguard_home_manager/models/server_status.dart';
+import 'package:adguard_home_manager/providers/filtering_provider.dart';
+import 'package:adguard_home_manager/providers/servers_provider.dart';
+import 'package:adguard_home_manager/providers/status_provider.dart';
 import 'package:adguard_home_manager/services/api_client.dart';
 import 'package:adguard_home_manager/services/diagnostic_redactor.dart';
 import 'package:adguard_home_manager/services/domain_input_parser.dart';
@@ -448,7 +454,7 @@ void main() {
 
       final coord = ExceptionRuleCoordinator();
 
-      // 1) Normal exception on SendGrid -> succeeds, preserves all prior rules, cache cleared, post-check confirmed!
+      // 1) Normal exception on SendGrid -> succeeds, preserves all prior rules, cache cleared, post-check confirmed, and clean undo removes ONLY added rule!
       final outOk = await coord.applyExceptionAndVerify(
         apiClient: apiClient,
         verifyHost: 'u56112681.ct.sendgrid.net',
@@ -457,7 +463,7 @@ void main() {
       expect(outOk.writeSucceeded, isTrue);
       expect(outOk.verifiedUnblocked, isTrue);
       expect(outOk.stillBlockedByImportant, isFalse);
-      expect(outOk.message, contains('放行已生效'));
+      expect(outOk.message, contains('规则检测确认放行'));
       expect(cacheCleared, greaterThanOrEqualTo(1));
       expect(
         userRules,
@@ -468,6 +474,17 @@ void main() {
           '@@||u56112681.ct.sendgrid.net^',
         ],
       );
+
+      final undoRes = await coord.undoAddedException(
+        apiClient: apiClient,
+        addedRule: '@@||u56112681.ct.sendgrid.net^',
+        undoToken: outOk.undoToken,
+      );
+      expect(undoRes.ok, isTrue);
+      expect(userRules, isNot(contains('@@||u56112681.ct.sendgrid.net^')));
+      expect(userRules, contains('! comment preserved'));
+      expect(userRules, contains('||existing.ad.example^'));
+      expect(userRules, contains('||imp.example^\$important'));
 
       // 2) Concurrent writes on different rules -> serialized without losing either!
       final fA = coord.applyExceptionAndVerify(
@@ -488,17 +505,6 @@ void main() {
       expect(results[0].stillBlockedByImportant, isTrue);
       expect(userRules, contains('@@||imp.example^'));
       expect(userRules, contains('@@||sub2.example.org^'));
-
-      // 3) Undo removes ONLY added rule and preserves user's original rules
-      final undoRes = await coord.undoAddedException(
-        apiClient: apiClient,
-        addedRule: '@@||u56112681.ct.sendgrid.net^',
-      );
-      expect(undoRes.ok, isTrue);
-      expect(userRules, isNot(contains('@@||u56112681.ct.sendgrid.net^')));
-      expect(userRules, contains('! comment preserved'));
-      expect(userRules, contains('||existing.ad.example^'));
-      expect(userRules, contains('||imp.example^\$important'));
       }, _PassthroughHttpOverrides());
     });
 
@@ -582,6 +588,557 @@ void main() {
       await tester.tap(find.textContaining('撤销'));
       await tester.pump();
       expect(undone, <String>['@@||u56112681.ct.sendgrid.net^']);
+    });
+  });
+
+  group('RC2 Section 1. Full Offline PSL (ICANN + PRIVATE + Wildcards + Exceptions) & Whitelist Boundary', () {
+    test('enforces ICANN, PRIVATE, wildcard, exception, unknown-TLD fallback rejection, unrelated rule rejection, and narrow validation', () {
+      // Standard & multi-label ICANN suffixes
+      expect(DomainInputParser.registrableDomain('u56112681.ct.sendgrid.net'), 'sendgrid.net');
+      expect(DomainInputParser.registrableDomain('a.example.co.uk'), 'example.co.uk');
+      expect(DomainInputParser.registrableDomain('a.example.com.au'), 'example.com.au');
+      expect(DomainInputParser.isPublicSuffix('co.uk'), isTrue);
+      expect(DomainInputParser.isPublicSuffix('com.au'), isTrue);
+
+      // PRIVATE PSL section (github.io, appspot.com)
+      final ghMatch = DomainInputParser.inspectPublicSuffix('foo.github.io');
+      expect(ghMatch, isNotNull);
+      expect(ghMatch!.isKnownRule, isTrue);
+      expect(ghMatch.isPrivate, isTrue);
+      expect(ghMatch.icann, isFalse);
+      expect(ghMatch.registrableDomain, 'foo.github.io');
+      expect(DomainInputParser.isPublicSuffix('github.io'), isTrue);
+      expect(DomainInputParser.registrableDomain('github.io'), isNull);
+      expect(DomainInputParser.buildParentDomains('foo.github.io'), <String>['foo.github.io']);
+
+      expect(DomainInputParser.isPublicSuffix('appspot.com'), isTrue);
+      expect(DomainInputParser.registrableDomain('foo.appspot.com'), 'foo.appspot.com');
+      expect(DomainInputParser.buildParentDomains('foo.appspot.com'), <String>['foo.appspot.com']);
+
+      // Broad whitelist MUST reject PRIVATE suffixes like github.io / appspot.com
+      final ghSug = WhitelistPlanner.buildSuggestion(
+        originalHost: 'foo.github.io',
+        matchedRules: const [
+          MatchedRuleInfo(text: '||github.io^', filterListId: 1, sourceName: 'List'),
+        ],
+      );
+      expect(ghSug.narrowRule, '@@||foo.github.io^');
+      expect(ghSug.broadRule, isNull);
+      expect(WhitelistPlanner.extractSafeAnchorDomain('||github.io^'), isNull);
+      expect(WhitelistPlanner.extractSafeAnchorDomain('||appspot.com^'), isNull);
+
+      // PSL wildcard rules (*.ck -> foo.ck is public suffix, bar.foo.ck is registrable)
+      expect(DomainInputParser.isPublicSuffix('foo.ck'), isTrue);
+      expect(DomainInputParser.registrableDomain('foo.ck'), isNull);
+      expect(DomainInputParser.registrableDomain('bar.foo.ck'), 'bar.foo.ck');
+      expect(DomainInputParser.buildParentDomains('bar.foo.ck'), <String>['bar.foo.ck']);
+      expect(WhitelistPlanner.extractSafeAnchorDomain('||foo.ck^'), isNull);
+
+      // PSL exception rules (!www.ck overrides *.ck, !city.kawasaki.jp overrides *.kawasaki.jp)
+      expect(DomainInputParser.isPublicSuffix('www.ck'), isFalse);
+      expect(DomainInputParser.registrableDomain('www.ck'), 'www.ck');
+      expect(DomainInputParser.isPublicSuffix('other.kawasaki.jp'), isTrue);
+      expect(DomainInputParser.isPublicSuffix('city.kawasaki.jp'), isFalse);
+      expect(DomainInputParser.registrableDomain('sub.city.kawasaki.jp'), 'city.kawasaki.jp');
+      expect(
+        DomainInputParser.buildParentDomains('sub.city.kawasaki.jp'),
+        <String>['sub.city.kawasaki.jp', 'city.kawasaki.jp'],
+      );
+
+      // Unknown / unmanaged suffix MUST NOT fall back to last-2-labels registrable guess and disables broad
+      final unknownMatch = DomainInputParser.inspectPublicSuffix('a.b.c.unknowntld');
+      expect(unknownMatch, isNotNull);
+      expect(unknownMatch!.isKnownRule, isFalse);
+      expect(DomainInputParser.registrableDomain('a.b.c.unknowntld'), isNull);
+      final unknownSug = WhitelistPlanner.buildSuggestion(
+        originalHost: 'a.b.c.unknowntld',
+        matchedRules: const [
+          MatchedRuleInfo(text: '||b.c.unknowntld^', filterListId: 1, sourceName: 'Custom'),
+        ],
+      );
+      expect(unknownSug.broadRule, isNull);
+      expect(unknownSug.broadDisabledReason, contains('PSL'));
+
+      // Unrelated matched rule domain MUST disable broad button even if syntax is ||other^
+      final unrelatedSug = WhitelistPlanner.buildSuggestion(
+        originalHost: 'u56112681.ct.sendgrid.net',
+        matchedRules: const [
+          MatchedRuleInfo(text: '||sendgrid.com^', filterListId: 1, sourceName: 'List'),
+          MatchedRuleInfo(text: '||unrelated.example^', filterListId: 2, sourceName: 'List2'),
+        ],
+      );
+      expect(unrelatedSug.narrowRule, '@@||u56112681.ct.sendgrid.net^');
+      expect(unrelatedSug.broadRule, isNull);
+      expect(unrelatedSug.broadDisabledReason, contains('包含关系'));
+
+      // Narrow button rejects invalid domains and public suffixes
+      final suffixInputSug = WhitelistPlanner.buildSuggestion(
+        originalHost: 'github.io',
+        matchedRules: const [],
+      );
+      expect(suffixInputSug.narrowRule, isNull);
+      expect(suffixInputSug.broadRule, isNull);
+    });
+  });
+
+  group('RC2 Section 2. Post-Write A/AAAA Verification & Classification Matrix', () {
+    test('classifies NotFilteredError & unknown reasons safely and covers all 7+ verification outcomes', () async {
+      // Static reason classification checks
+      expect(HostCheckResult.classifyReason('NotFilteredError'), RuleCheckStatus.failed);
+      expect(HostCheckResult.classifyReason('BrandNewUnknownReason'), RuleCheckStatus.unknown);
+      expect(HostCheckResult.classifyReason('Rewrite'), RuleCheckStatus.rewritten);
+      expect(HostCheckResult.classifyReason('RewriteRule'), RuleCheckStatus.rewritten);
+      expect(HostCheckResult.classifyReason('NotFilteredNotFound'), RuleCheckStatus.notBlocked);
+      expect(HostCheckResult.classifyReason('NotFilteredWhiteList'), RuleCheckStatus.whitelisted);
+
+      await HttpOverrides.runWithHttpOverrides(() async {
+        late ApiResponse Function(String qtype) checkResponder;
+        var resetCacheSuccess = true;
+        final rules = <String>['||old.example^'];
+        var rev = 1;
+
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        server.listen((req) async {
+          final p = req.uri.path;
+          if (p == '/control/filtering/status') {
+            req.response
+              ..statusCode = 200
+              ..headers.contentType = ContentType.json
+              ..write(jsonEncode({
+                'filters': [],
+                'whitelist_filters': [],
+                'user_rules': rules,
+                'user_rules_revision': 'rev:$rev',
+                'interval': 24,
+                'enabled': true,
+              }));
+          } else if (p == '/control/filtering/set_rules') {
+            final body = jsonDecode(await utf8.decoder.bind(req).join()) as Map<String, dynamic>;
+            rules
+              ..clear()
+              ..addAll((body['rules'] as List).map((e) => e.toString()));
+            rev++;
+            req.response.statusCode = 200;
+          } else if (p == '/control/cache_clear') {
+            req.response.statusCode = resetCacheSuccess ? 200 : 500;
+          } else if (p == '/control/filtering/check_host') {
+            final qtype = req.uri.queryParameters['qtype'] ?? 'A';
+            final r = checkResponder(qtype);
+            if (!r.successful) {
+              req.response.statusCode = r.statusCode ?? 500;
+              req.response.write(r.content ?? 'err');
+            } else {
+              req.response
+                ..statusCode = 200
+                ..headers.contentType = ContentType.json
+                ..write(jsonEncode(r.content));
+            }
+          } else {
+            req.response.statusCode = 404;
+          }
+          await req.response.close();
+        });
+
+        final apiClient = ApiClientV2(
+          server: Server(
+            id: 'sec2-srv',
+            name: 'Sec2',
+            connectionMethod: 'http',
+            domain: '127.0.0.1',
+            port: server.port,
+            defaultServer: true,
+            runningOnHa: false,
+          ),
+        );
+        final coord = ExceptionRuleCoordinator();
+
+        // 1. A whitelisted, AAAA failed/timeout -> incomplete, NOT green unblocked!
+        checkResponder = (q) => q == 'A'
+            ? const ApiResponse(successful: true, content: {'reason': 'NotFilteredWhiteList', 'rules': []})
+            : const ApiResponse(successful: false, statusCode: 504, content: 'timeout');
+        final r1 = await coord.applyExceptionAndVerify(
+          apiClient: apiClient,
+          verifyHost: 'case1.example',
+          exceptionRule: '@@||case1.example^',
+        );
+        expect(r1.writeSucceeded, isTrue);
+        expect(r1.verifiedUnblocked, isFalse);
+        expect(r1.verificationIncomplete, isTrue);
+        expect(r1.message, contains('核验不完整'));
+
+        // 2. A notBlocked, AAAA still blocked -> reports AAAA blocked + rule!
+        checkResponder = (q) => q == 'A'
+            ? const ApiResponse(successful: true, content: {'reason': 'NotFilteredNotFound', 'rules': []})
+            : const ApiResponse(successful: true, content: {
+                'reason': 'FilteredBlackList',
+                'rules': [{'text': '||case2.example^', 'filter_list_id': 1}],
+              });
+        final r2 = await coord.applyExceptionAndVerify(
+          apiClient: apiClient,
+          verifyHost: 'case2.example',
+          exceptionRule: '@@||case2.example^',
+        );
+        expect(r2.verifiedUnblocked, isFalse);
+        expect(r2.postCheckAAAA?.isBlocked, isTrue);
+        expect(r2.message, contains('AAAA'));
+
+        // 3. A failed, AAAA normal -> incomplete!
+        checkResponder = (q) => q == 'A'
+            ? const ApiResponse(successful: false, statusCode: 500)
+            : const ApiResponse(successful: true, content: {'reason': 'NotFilteredNotFound', 'rules': []});
+        final r3 = await coord.applyExceptionAndVerify(
+          apiClient: apiClient,
+          verifyHost: 'case3.example',
+          exceptionRule: '@@||case3.example^',
+        );
+        expect(r3.verifiedUnblocked, isFalse);
+        expect(r3.verificationIncomplete, isTrue);
+
+        // 4. Unknown reason -> incomplete, NOT unblocked!
+        checkResponder = (q) => const ApiResponse(
+              successful: true,
+              content: {'reason': 'SomeFutureUnknownReason', 'rules': []},
+            );
+        final r4 = await coord.applyExceptionAndVerify(
+          apiClient: apiClient,
+          verifyHost: 'case4.example',
+          exceptionRule: '@@||case4.example^',
+        );
+        expect(r4.verifiedUnblocked, isFalse);
+        expect(r4.verificationIncomplete, isTrue);
+        expect(r4.postCheckA?.status, RuleCheckStatus.unknown);
+
+        // 5. NotFilteredError -> incomplete/failed, NOT unblocked!
+        checkResponder = (q) => const ApiResponse(
+              successful: true,
+              content: {'reason': 'NotFilteredError', 'rules': []},
+            );
+        final r5 = await coord.applyExceptionAndVerify(
+          apiClient: apiClient,
+          verifyHost: 'case5.example',
+          exceptionRule: '@@||case5.example^',
+        );
+        expect(r5.verifiedUnblocked, isFalse);
+        expect(r5.verificationIncomplete, isTrue);
+        expect(r5.postCheckA?.status, RuleCheckStatus.failed);
+
+        // 6. Both A & AAAA clean -> verifiedUnblocked + honest caveat!
+        checkResponder = (q) => const ApiResponse(
+              successful: true,
+              content: {'reason': 'NotFilteredWhiteList', 'rules': []},
+            );
+        final r6 = await coord.applyExceptionAndVerify(
+          apiClient: apiClient,
+          verifyHost: 'case6.example',
+          exceptionRule: '@@||case6.example^',
+        );
+        expect(r6.verifiedUnblocked, isTrue);
+        expect(r6.cacheFlushFailed, isFalse);
+        expect(r6.message, contains('规则检测确认放行'));
+        expect(r6.message, contains('不保证邮件跳转'));
+
+        // 7. Cache reset failed -> partial completion!
+        resetCacheSuccess = false;
+        final r7 = await coord.applyExceptionAndVerify(
+          apiClient: apiClient,
+          verifyHost: 'case7.example',
+          exceptionRule: '@@||case7.example^',
+        );
+        expect(r7.verifiedUnblocked, isTrue);
+        expect(r7.cacheFlushFailed, isTrue);
+        expect(r7.message, contains('部分完成'));
+
+        // 8. Rewrite keeps independent state!
+        resetCacheSuccess = true;
+        checkResponder = (q) => const ApiResponse(
+              successful: true,
+              content: {'reason': 'Rewrite', 'rules': []},
+            );
+        final r8 = await coord.applyExceptionAndVerify(
+          apiClient: apiClient,
+          verifyHost: 'case8.example',
+          exceptionRule: '@@||case8.example^',
+        );
+        expect(r8.verifiedUnblocked, isFalse);
+        expect(r8.postCheckA?.status, RuleCheckStatus.rewritten);
+      }, _PassthroughHttpOverrides());
+    });
+  });
+
+  group('RC2 Section 3. Shared Per-Server Queue, Concurrency, 409 Conflict & Verifiable Undo', () {
+    test('serializes multi-coordinator & provider writes per server, isolates servers, handles failure/409, and rejects unverifiable undo', () async {
+      await HttpOverrides.runWithHttpOverrides(() async {
+        ServerRuleWriteQueue.resetForTest();
+
+        final rulesA = <String>['||initial.example^', '@@||already.example^'];
+        var revA = 1;
+        final rulesB = <String>['||b-init.example^'];
+        var revB = 1;
+        var injectExternalBetweenReadAndWriteA = false;
+        var delayGetStatusAMs = 0;
+        var failNextSetRulesA = false;
+
+        Future<HttpServer> startMockServer({
+          required List<String> rules,
+          required int Function() getRev,
+          required void Function() bumpRev,
+          int Function()? delayMs,
+          bool Function()? shouldFailSet,
+          void Function()? onBeforeSetCheck,
+        }) async {
+          final srv = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          srv.listen((req) async {
+            final p = req.uri.path;
+            if (p == '/control/filtering/status') {
+              final d = delayMs?.call() ?? 0;
+              if (d > 0) await Future<void>.delayed(Duration(milliseconds: d));
+              req.response
+                ..statusCode = 200
+                ..headers.contentType = ContentType.json
+                ..write(jsonEncode({
+                  'filters': [],
+                  'whitelist_filters': [],
+                  'user_rules': rules,
+                  'user_rules_revision': 'v1:${getRev()}',
+                  'interval': 24,
+                  'enabled': true,
+                }));
+            } else if (p == '/control/filtering/set_rules') {
+              if (shouldFailSet?.call() == true) {
+                req.response.statusCode = 500;
+                await req.response.close();
+                return;
+              }
+              onBeforeSetCheck?.call();
+              final body = jsonDecode(await utf8.decoder.bind(req).join()) as Map<String, dynamic>;
+              final exp = body['expected_revision']?.toString();
+              final cur = 'v1:${getRev()}';
+              if (exp != null && exp.isNotEmpty && exp != cur) {
+                req.response.statusCode = 409;
+                req.response.write('conflict');
+              } else {
+                rules
+                  ..clear()
+                  ..addAll((body['rules'] as List).map((e) => e.toString()));
+                bumpRev();
+                req.response.statusCode = 200;
+              }
+            } else if (p == '/control/filtering/check_host') {
+              req.response
+                ..statusCode = 200
+                ..headers.contentType = ContentType.json
+                ..write(jsonEncode({'reason': 'NotFilteredWhiteList', 'rules': []}));
+            } else if (p == '/control/cache_clear') {
+              req.response.statusCode = 200;
+            } else {
+              req.response.statusCode = 404;
+            }
+            await req.response.close();
+          });
+          return srv;
+        }
+
+        final srvA = await startMockServer(
+          rules: rulesA,
+          getRev: () => revA,
+          bumpRev: () => revA++,
+          delayMs: () => delayGetStatusAMs,
+          shouldFailSet: () {
+            if (failNextSetRulesA) {
+              failNextSetRulesA = false;
+              return true;
+            }
+            return false;
+          },
+          onBeforeSetCheck: () {
+            if (injectExternalBetweenReadAndWriteA) {
+              injectExternalBetweenReadAndWriteA = false;
+              rulesA.add('||external-client.example^');
+              revA++;
+            }
+          },
+        );
+        addTearDown(() => srvA.close(force: true));
+
+        final srvB = await startMockServer(
+          rules: rulesB,
+          getRev: () => revB,
+          bumpRev: () => revB++,
+        );
+        addTearDown(() => srvB.close(force: true));
+
+        final serverA = Server(
+          id: 'srv-a',
+          name: 'Server A',
+          connectionMethod: 'http',
+          domain: '127.0.0.1',
+          port: srvA.port,
+          defaultServer: true,
+          runningOnHa: false,
+        );
+        final serverB = Server(
+          id: 'srv-b',
+          name: 'Server B',
+          connectionMethod: 'http',
+          domain: '127.0.0.1',
+          port: srvB.port,
+          defaultServer: false,
+          runningOnHa: false,
+        );
+        final apiA = ApiClientV2(server: serverA);
+        final apiB = ApiClientV2(server: serverB);
+
+        // 1. Two separate ExceptionRuleCoordinator instances + FilteringProvider + StatusProvider concurrently on Server A
+        final coord1 = ExceptionRuleCoordinator();
+        final coord2 = ExceptionRuleCoordinator();
+
+        final serversProv = ServersProvider()..setApiClient2(apiA);
+        final statusProv = StatusProvider()
+          ..update(serversProv)
+          ..setServerStatusData(
+            data: ServerStatus(
+              stats: DnsStatistics(
+                timeUnits: 'hours',
+                topQueriedDomains: const [],
+                topBlockedDomains: const [],
+                topUpstreamResponses: const [],
+                topUpstreamsAvgTime: const [],
+                dnsQueries: const [],
+                blockedFiltering: const [],
+                numDnsQueries: 0,
+                numBlockedFiltering: 0,
+                avgProcessingTime: 0,
+              ),
+              filteringStatus: fs.FilteringStatus(
+                filters: const [],
+                whitelistFilters: const [],
+                userRules: const [],
+                interval: 24,
+                enabled: true,
+              ),
+              timeGeneralDisabled: 0,
+              generalEnabled: true,
+              filteringEnabled: true,
+              safeBrowsingEnabled: false,
+              parentalControlEnabled: false,
+              serverVersion: 'v0.107.0',
+              dhcpAvailable: false,
+            ),
+          );
+        final filteringProv = FilteringProvider()..update(serversProv, statusProv);
+
+        final futures = await Future.wait([
+          coord1.applyExceptionAndVerify(
+            apiClient: apiA,
+            verifyHost: 'c1.example',
+            exceptionRule: '@@||c1.example^',
+          ),
+          coord2.applyExceptionAndVerify(
+            apiClient: apiA,
+            verifyHost: 'c2.example',
+            exceptionRule: '@@||c2.example^',
+          ),
+          filteringProv.addCustomRule('||custom-ui.example^'),
+          statusProv.blockUnblockDomain(domain: 'status-ui.example', newStatus: 'unblock'),
+        ]);
+        expect((futures[0] as ExceptionWriteOutcome).writeSucceeded, isTrue);
+        expect((futures[1] as ExceptionWriteOutcome).writeSucceeded, isTrue);
+        expect(futures[2], isTrue);
+        expect(futures[3], isTrue);
+        expect(rulesA, containsAll(<String>[
+          '||initial.example^',
+          '@@||already.example^',
+          '@@||c1.example^',
+          '@@||c2.example^',
+          '||custom-ui.example^',
+          '@@||status-ui.example^\$important',
+        ]));
+
+        // 2. Failure on one queued write does NOT stall subsequent writes
+        failNextSetRulesA = true;
+        final failOut = await coord1.applyExceptionAndVerify(
+          apiClient: apiA,
+          verifyHost: 'will-fail.example',
+          exceptionRule: '@@||will-fail.example^',
+        );
+        expect(failOut.writeSucceeded, isFalse);
+        final afterFailOut = await coord1.applyExceptionAndVerify(
+          apiClient: apiA,
+          verifyHost: 'after-fail.example',
+          exceptionRule: '@@||after-fail.example^',
+        );
+        expect(afterFailOut.writeSucceeded, isTrue);
+        expect(rulesA, contains('@@||after-fail.example^'));
+
+        // 3. Server isolation: slow Server A does NOT block fast Server B
+        delayGetStatusAMs = 120;
+        final slowA = coord1.applyExceptionAndVerify(
+          apiClient: apiA,
+          verifyHost: 'slow-a.example',
+          exceptionRule: '@@||slow-a.example^',
+        );
+        final swB = Stopwatch()..start();
+        final fastB = await coord1.applyExceptionAndVerify(
+          apiClient: apiB,
+          verifyHost: 'fast-b.example',
+          exceptionRule: '@@||fast-b.example^',
+        );
+        swB.stop();
+        expect(fastB.writeSucceeded, isTrue);
+        expect(swB.elapsedMilliseconds, lessThan(100));
+        await slowA;
+        delayGetStatusAMs = 0;
+
+        // 4. Pre-existing rule MUST set addedRule == null and refuse undo
+        final dupOut = await coord1.applyExceptionAndVerify(
+          apiClient: apiA,
+          verifyHost: 'already.example',
+          exceptionRule: '@@||already.example^',
+        );
+        expect(dupOut.addedRule, isNull);
+        expect(dupOut.undoToken, isNull);
+        final dupUndo = await coord1.undoAddedException(
+          apiClient: apiA,
+          addedRule: '@@||already.example^',
+        );
+        expect(dupUndo.ok, isFalse);
+        expect(rulesA, contains('@@||already.example^'));
+
+        // 5. Undo ownership: add -> user deletes & re-adds exact same text -> old undo MUST refuse!
+        final addTracked = await coord1.applyExceptionAndVerify(
+          apiClient: apiA,
+          verifyHost: 'tracked.example',
+          exceptionRule: '@@||tracked.example^',
+        );
+        expect(addTracked.addedRule, '@@||tracked.example^');
+        expect(addTracked.undoToken, isNotNull);
+
+        expect(await filteringProv.removeCustomRule('@@||tracked.example^'), isTrue);
+        expect(await filteringProv.addCustomRule('@@||tracked.example^'), isTrue);
+
+        final staleUndo = await coord1.undoAddedException(
+          apiClient: apiA,
+          addedRule: '@@||tracked.example^',
+          undoToken: addTracked.undoToken,
+        );
+        expect(staleUndo.ok, isFalse);
+        expect(staleUndo.message, contains('拒绝猜测删除'));
+        expect(rulesA, contains('@@||tracked.example^'));
+
+        // 6. External client concurrent modification -> 409 Conflict, re-read fresh rules, external rule intact!
+        injectExternalBetweenReadAndWriteA = true;
+        final conflictOut = await coord1.applyExceptionAndVerify(
+          apiClient: apiA,
+          verifyHost: 'race.example',
+          exceptionRule: '@@||race.example^',
+        );
+        expect(conflictOut.writeSucceeded, isFalse);
+        expect(conflictOut.conflictDetected, isTrue);
+        expect(conflictOut.message, contains('版本冲突'));
+        expect(rulesA, contains('||external-client.example^'));
+        expect(rulesA, isNot(contains('@@||race.example^')));
+      }, _PassthroughHttpOverrides());
     });
   });
 }

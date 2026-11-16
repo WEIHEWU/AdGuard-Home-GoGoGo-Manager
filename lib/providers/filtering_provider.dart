@@ -7,6 +7,7 @@ import 'package:adguard_home_manager/constants/enums.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/models/filtering.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
+import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
 
 enum FilteringListActions { edit, enable, disable }
@@ -186,25 +187,61 @@ class FilteringProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> removeCustomRule(String rule) async {
-    final List<String> newRules =
-        filtering!.userRules.where((r) => r != rule).toList();
+  Future<bool> _mutateCustomRulesOnServer(
+    List<String> Function(List<String> currentRules) transform, {
+    String? explicitExpectedRevision,
+  }) async {
+    final api = _serversProvider?.apiClient2;
+    if (api == null) return false;
 
-    final result =
-        await _serversProvider!.apiClient2!.setCustomRules(rules: newRules);
+    return ServerRuleWriteQueue.run(api.server, (session) async {
+      // 轮到本服务器写队列时重新拉取最新规则与 revision，避免基于排队前快照盲写覆盖
+      final beforeRes = await api.getFiltering();
+      if (beforeRes.successful != true || beforeRes.content is! Filtering) {
+        notifyListeners();
+        return false;
+      }
+      final latestFiltering = beforeRes.content as Filtering;
+      final expectedRev =
+          explicitExpectedRevision ?? latestFiltering.userRulesRevision;
+      final newRules = transform(List<String>.from(latestFiltering.userRules));
 
-    if (result.successful == true) {
-      Filtering filteringData = filtering!;
-      filteringData.userRules = newRules;
-      _filtering = filteringData;
-      _flushDnsCaches();
+      final result = await api.setCustomRules(
+        rules: newRules,
+        expectedRevision: expectedRev,
+      );
 
-      notifyListeners();
-      return true;
-    } else {
-      notifyListeners();
-      return false;
-    }
+      if (result.successful == true) {
+        session.bumpLocalEpoch();
+        // 优先回读最新状态与更新后的 revision，确保本地视图与服务端一致
+        final afterRes = await api.getFiltering();
+        if (afterRes.successful == true && afterRes.content is Filtering) {
+          _filtering = afterRes.content as Filtering;
+        } else {
+          final filteringData = _filtering ?? latestFiltering;
+          filteringData.userRules = newRules;
+          _filtering = filteringData;
+        }
+        _flushDnsCaches();
+        notifyListeners();
+        return true;
+      } else {
+        if (result.statusCode == 409) {
+          final refreshed = await api.getFiltering();
+          if (refreshed.successful == true && refreshed.content is Filtering) {
+            _filtering = refreshed.content as Filtering;
+          }
+        }
+        notifyListeners();
+        return false;
+      }
+    });
+  }
+
+  Future<bool> removeCustomRule(String rule) {
+    return _mutateCustomRulesOnServer(
+      (current) => current.where((r) => r != rule).toList(),
+    );
   }
 
   Future<bool> deleteList(
@@ -265,7 +302,7 @@ class FilteringProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> addCustomRule(String rule) async {
+  Future<bool> addCustomRule(String rule) {
     final String trimmed = rule.trim();
     final Set<String> toRemove = {trimmed};
     if (trimmed.startsWith('@@||')) {
@@ -285,43 +322,23 @@ class FilteringProvider with ChangeNotifier {
         '@@$base\$important',
       });
     }
-    final List<String> newRules = filtering!.userRules
-        .where((r) => !toRemove.contains(r.trim()))
-        .toList();
-    newRules.add(trimmed);
-
-    final result =
-        await _serversProvider!.apiClient2!.setCustomRules(rules: newRules);
-
-    if (result.successful == true) {
-      Filtering filteringData = filtering!;
-      filteringData.userRules = newRules;
-      _filtering = filteringData;
-      _flushDnsCaches();
-      notifyListeners();
-      return true;
-    } else {
-      notifyListeners();
-      return false;
-    }
+    return _mutateCustomRulesOnServer((current) {
+      final newRules =
+          current.where((r) => !toRemove.contains(r.trim())).toList();
+      newRules.add(trimmed);
+      return newRules;
+    });
   }
 
-  Future<bool> setCustomRules(List<String> rules) async {
+  Future<bool> setCustomRules(
+    List<String> rules, {
+    String? expectedRevision,
+  }) {
     final newRules = rules.where((r) => r != " " && r != "").toList();
-    final result =
-        await _serversProvider!.apiClient2!.setCustomRules(rules: newRules);
-
-    if (result.successful == true) {
-      Filtering filteringData = filtering!;
-      filteringData.userRules = newRules;
-      _filtering = filteringData;
-      _flushDnsCaches();
-      notifyListeners();
-      return true;
-    } else {
-      notifyListeners();
-      return false;
-    }
+    return _mutateCustomRulesOnServer(
+      (_) => newRules,
+      explicitExpectedRevision: expectedRevision,
+    );
   }
 
   Future<Map<String, dynamic>> addList(

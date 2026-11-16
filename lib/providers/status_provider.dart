@@ -9,6 +9,7 @@ import 'package:adguard_home_manager/models/filtering_status.dart';
 import 'package:adguard_home_manager/constants/enums.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
 import 'package:adguard_home_manager/functions/time_server_disabled.dart';
+import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
 import 'package:adguard_home_manager/services/module_config_service.dart';
 
 class StatusProvider with ChangeNotifier {
@@ -336,11 +337,17 @@ class StatusProvider with ChangeNotifier {
   Future<bool> blockUnblockDomain(
       {required String domain, required String newStatus}) async {
     if (_serverStatus == null) return false;
+    final api = _serversProvider?.apiClient2;
+    if (api == null) return false;
 
-    final rules = await _serversProvider!.apiClient2!.getFilteringRules();
+    return ServerRuleWriteQueue.run(api.server, (session) async {
+      final rules = await api.getFilteringRules();
+      if (rules.successful != true || rules.content is! FilteringStatus) {
+        return false;
+      }
 
-    if (rules.successful == true) {
       FilteringStatus oldStatus = _serverStatus!.filteringStatus;
+      final fetched = rules.content as FilteringStatus;
 
       final exactRules = {
         "||$domain^",
@@ -348,8 +355,7 @@ class StatusProvider with ChangeNotifier {
         "@@||$domain^",
         "@@||$domain^\$important",
       };
-      List<String> newRules = (rules.content as FilteringStatus)
-          .userRules
+      List<String> newRules = fetched.userRules
           .where((d) => !exactRules.contains(d.trim()))
           .toList();
       if (newStatus == 'block') {
@@ -361,22 +367,30 @@ class StatusProvider with ChangeNotifier {
       newObj.userRules = newRules;
       _filteringStatus = newObj;
 
-      final result = await _serversProvider!.apiClient2!
-          .postFilteringRules(data: {'rules': newRules});
+      final result = await api.postFilteringRules(
+        data: {
+          'rules': newRules,
+          if (fetched.userRulesRevision != null &&
+              fetched.userRulesRevision!.isNotEmpty)
+            'expected_revision': fetched.userRulesRevision,
+        },
+      );
 
       if (result.successful == true) {
+        session.bumpLocalEpoch();
         // 放行或拦截域名后立即清空 AGH 缓存和系统 DNS 缓存，无需等待 TTL 过期
-        unawaited(_serversProvider!.apiClient2!.resetDnsCache());
+        unawaited(api.resetDnsCache());
         if (Platform.isAndroid) {
           unawaited(ModuleConfigService().flushSystemDnsCache());
         }
         return true;
       } else {
+        if (result.statusCode == 409) {
+          await getFilteringRules();
+        }
         _filteringStatus = oldStatus;
         return false;
       }
-    } else {
-      return false;
-    }
+    });
   }
 }

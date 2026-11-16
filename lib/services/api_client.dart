@@ -195,14 +195,18 @@ class ApiClientV2 {
   }
 
   Future<ApiResponse> postFilteringRules({
-    required Map<String, List<String>> data,
+    required Map<String, dynamic> data,
   }) async {
     final result = await HttpRequestClient.post(
       urlPath: '/filtering/set_rules',
       server: server,
       body: data,
     );
-    return ApiResponse(successful: result.successful);
+    return ApiResponse(
+      successful: result.successful,
+      statusCode: result.statusCode,
+      content: result.body,
+    );
   }
 
   Future<ApiResponse> getFiltering() async {
@@ -217,24 +221,43 @@ class ApiClientV2 {
               ...jsonDecode(body),
               "blocked_services": [],
             }));
-        return ApiResponse(successful: true, content: filtering);
+        return ApiResponse(
+          successful: true,
+          statusCode: results1.statusCode,
+          content: filtering,
+        );
       } catch (_) {
-        return const ApiResponse(successful: false);
+        return ApiResponse(
+          successful: false,
+          statusCode: results1.statusCode,
+        );
       }
     } else {
-      return const ApiResponse(successful: false);
+      return ApiResponse(
+        successful: false,
+        statusCode: results1.statusCode,
+      );
     }
   }
 
   Future<ApiResponse> setCustomRules({
     required List<String> rules,
+    String? expectedRevision,
   }) async {
+    final body = <String, dynamic>{'rules': rules};
+    if (expectedRevision != null && expectedRevision.isNotEmpty) {
+      body['expected_revision'] = expectedRevision;
+    }
     final result = await HttpRequestClient.post(
       urlPath: '/filtering/set_rules',
       server: server,
-      body: {'rules': rules},
+      body: body,
     );
-    return ApiResponse(successful: result.successful);
+    return ApiResponse(
+      successful: result.successful,
+      statusCode: result.statusCode,
+      content: result.body,
+    );
   }
 
   Future<ApiResponse> addFilteringList({
