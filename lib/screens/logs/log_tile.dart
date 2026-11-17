@@ -314,7 +314,10 @@ class LogTile extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 10),
-              LogStatusIndicator(reason: log.reason),
+              LogStatusIndicator(
+                reason: log.reason,
+                showExpandArrow: false,
+              ),
             ],
           ),
         ),
