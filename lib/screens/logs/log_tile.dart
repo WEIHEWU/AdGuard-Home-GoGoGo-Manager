@@ -54,8 +54,11 @@ class LogTile extends StatelessWidget {
       filterNames: filterNames,
       whitelistNames: whitelistNames,
     );
-    final ruleHint =
-        matchedRules.isNotEmpty ? matchedRules.first.text : '';
+    final ruleSummary = matchedRules.isNotEmpty
+        ? (matchedRules.first.sourceName.isNotEmpty
+            ? '${matchedRules.first.sourceName}: ${matchedRules.first.text}'
+            : matchedRules.first.text)
+        : log.reason;
     String? elapsedText;
     if (log.elapsedMs.isNotEmpty) {
       final parsed = double.tryParse(log.elapsedMs);
@@ -155,7 +158,7 @@ class LogTile extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('状态: ${filter['label']} (${log.reason})'),
+                  Text('状态: ${filter['label']} (${log.reason})${elapsedText != null ? " · $elapsedText" : ""}'),
                   if (log.predictedBlocked) ...[
                     const SizedBox(height: 4),
                     const Text(
@@ -267,7 +270,7 @@ class LogTile extends StatelessWidget {
                               ),
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 6),
                           Flexible(
                             child: Text(
                               convertTimestampLocalTimezone(log.time, 'HH:mm:ss'),
@@ -279,25 +282,12 @@ class LogTile extends StatelessWidget {
                               ),
                             ),
                           ),
-                          if (elapsedText != null) ...[
-                            const SizedBox(width: 8),
-                            Flexible(
-                              child: Text(
-                                '· $elapsedText',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: colorScheme.onSurfaceVariant,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ],
-                          if (ruleHint.isNotEmpty) ...[
-                            const SizedBox(width: 8),
+                          if (ruleSummary.isNotEmpty) ...[
+                            const SizedBox(width: 6),
                             Expanded(
+                              flex: 2,
                               child: Text(
-                                '· $ruleHint',
+                                '· $ruleSummary',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
@@ -314,10 +304,7 @@ class LogTile extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 10),
-              LogStatusIndicator(
-                reason: log.reason,
-                showExpandArrow: false,
-              ),
+              LogStatusIndicator(reason: log.reason),
             ],
           ),
         ),

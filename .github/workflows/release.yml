@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v2.24.27" ;;
+            *)  VERSION_TAG="v2.24.28" ;;
           esac
           case "$VERSION_TAG" in
             *-rc*|*beta*|*candidate*) IS_PRERELEASE="true"; MAKE_LATEST="false"; TITLE_SUFFIX=" (Pre-release)" ;;
@@ -48,12 +48,15 @@ jobs:
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            > ⚠️ **验证与实机状态说明**：Manager 静态分析（`flutter analyze --no-fatal-infos`）、48 项单元与 Widget 测试及 APK 签名包体核验已通过；本端环境未连接实机（`adb devices -l` 为空），候选版以来的真机视觉与端到端交互验收尚未在实机执行，升级后请以实际设备展示为准。
+            > ⚠️ **验证与实机状态说明**：Manager 静态分析（`flutter analyze --no-fatal-infos`）、51 项单元与 Widget 测试及 APK 签名包体核验已通过；本端环境未连接实机（`adb devices -l` 为空），候选版以来的真机视觉与端到端交互验收尚未在实机执行，升级后请以实际设备展示为准。
 
-            #### 小范围修复说明
-            修复日志页面开启“聚合重复”后，重复条目右侧缺少状态图标与文字的问题。聚合日志与普通日志现在统一显示实际处理状态，并保留查看详情的箭头。Core、规则和过滤策略保持不变。
+            #### 本次调整说明（日志列表紧凑布局）
+            - **删除独立展开箭头列与空占位**：普通行与聚合行统一采用紧凑状态列，彻底消除由于箭头列存在引起的视觉不对齐与空白占位冗余。
+            - **重复次数移至右侧状态区**：当且仅当重复次数 > 1 时在状态文字下方展示 `×N`（超过万次时自动精简为 `×10k`），不撑宽卡片，且为读屏提供完整无障碍语义支持（“已放行，重复 8 次” / “Processed, repeated 8 times”）。
+            - **重新分配第二行左侧空间**：移除原有的“重复 N 次”副标题文本，为协议标签、时间与规则来源/规则摘要（`· 规则摘要`）释放充足横向空间，超长时安全截断且在 300dp 极窄屏幕与 1.8x 大字号下无任何 RenderFlex 溢出。
+            - **交互行为与过滤策略保持不变**：点击整行继续弹出完整详情对话框，Core 二进制、过滤规则、订阅及网络策略完全保持不变。
 
             #### 升级提示
-            - 本次仅为管理器 UI 修复；如您已安装 `v20261117.1` 模块，仅覆盖安装新版 Manager APK（`2.24.27+195`）即可生效，无需重刷模块或重启 Core。
+            - 本次为管理器 UI 紧凑布局优化；覆盖安装 Manager APK（`2.24.28+197`）即可生效。
           files: |
             releases/AdGuardHomeManager.apk

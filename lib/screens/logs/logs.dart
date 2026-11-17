@@ -323,8 +323,10 @@ class _AggregatedLogsPageTile extends StatelessWidget {
     final badgeColor = group.isSni ? Colors.purple : Colors.blue;
     final protoLabel = group.isSni ? 'SNI' : 'DNS';
     final timeStr = convertTimestampLocalTimezone(group.time, 'HH:mm:ss');
-    final ruleHint = group.matchedRules.isNotEmpty
-        ? '${group.matchedRules.first.sourceName}: ${group.matchedRules.first.text}'
+    final ruleSummary = group.matchedRules.isNotEmpty
+        ? (group.matchedRules.first.sourceName.isNotEmpty
+            ? '${group.matchedRules.first.sourceName}: ${group.matchedRules.first.text}'
+            : group.matchedRules.first.text)
         : group.reason;
 
     final hasPredictedBlocked = group.rawEvents.any((e) => e.predictedBlocked);
@@ -478,10 +480,10 @@ class _AggregatedLogsPageTile extends StatelessWidget {
                               ),
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 6),
                           Flexible(
                             child: Text(
-                              '$timeStr · 重复 ${group.count} 次',
+                              timeStr,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
@@ -490,18 +492,21 @@ class _AggregatedLogsPageTile extends StatelessWidget {
                               ),
                             ),
                           ),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              '· $ruleHint',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: colorScheme.onSurfaceVariant,
-                                fontSize: 12,
+                          if (ruleSummary.isNotEmpty) ...[
+                            const SizedBox(width: 6),
+                            Expanded(
+                              flex: 2,
+                              child: Text(
+                                '· $ruleSummary',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: colorScheme.onSurfaceVariant,
+                                  fontSize: 12,
+                                ),
                               ),
                             ),
-                          ),
+                          ],
                         ],
                       ),
                     ),
@@ -511,7 +516,7 @@ class _AggregatedLogsPageTile extends StatelessWidget {
               const SizedBox(width: 10),
               LogStatusIndicator(
                 reason: group.reason,
-                showExpandArrow: true,
+                repeatCount: group.count,
               ),
             ],
           ),

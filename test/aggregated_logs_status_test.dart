@@ -36,6 +36,7 @@ Map<String, dynamic> _logJson({
   String qtype = 'A',
   String clientProto = '',
   List<Map<String, dynamic>> rules = const [],
+  bool predictedBlocked = false,
 }) {
   return <String, dynamic>{
     'time': timeIso,
@@ -45,6 +46,7 @@ Map<String, dynamic> _logJson({
     'elapsedMs': '1.2',
     'cached': false,
     'upstream': '',
+    'predicted_blocked': predictedBlocked,
     'question': <String, dynamic>{
       'type': qtype,
       'name': domain,
@@ -58,8 +60,8 @@ Map<String, dynamic> _logJson({
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  group('Aggregated Logs Status Indicator & UI Tests', () {
-    testWidgets('1-4. Logs page shows status + expand arrow in aggregated mode for all reasons, preserves predictedBlocked, toggles cleanly, and opens detail dialog', (tester) async {
+  group('Aggregated Logs Status Indicator & Compact UI Tests', () {
+    testWidgets('1. Logs page shows status and ×N on right, NO arrows or slots, preserves predictedBlocked, toggles cleanly, and opens detail dialog', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
 
@@ -230,7 +232,12 @@ void main() {
           expect(find.text('聚合重复'), findsOneWidget);
           expect(find.text('ads.example.com'), findsOneWidget);
 
-          // Check all aggregated entries show BOTH status icon+text AND expand arrow (using secondary color)
+          // Entire list must have NO expand arrows or arrow slots
+          expect(find.byIcon(Icons.expand_more_rounded), findsNothing);
+
+          // Subtitles must NOT have redundant '重复' text
+          expect(find.textContaining('重复 2 次'), findsNothing);
+
           Future<void> scrollToAndVerify({
             required String domain,
             required String expectedLabel,
@@ -241,7 +248,9 @@ void main() {
             await tester.scrollUntilVisible(
               dFinder,
               150,
-              scrollable: find.byType(Scrollable).last,
+              scrollable: find.byWidgetPredicate(
+                (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+              ),
             );
             await tester.pumpAndSettle();
             expect(dFinder, findsOneWidget);
@@ -261,14 +270,11 @@ void main() {
             );
             expect(statusIcon.color, expectedColor);
 
-            final arrowFinder = find.descendant(
-              of: indFinder,
-              matching: find.byIcon(Icons.expand_more_rounded),
+            // Repeat count is displayed on the right under the status text
+            expect(
+              find.descendant(of: indFinder, matching: find.text('×2')),
+              findsOneWidget,
             );
-            expect(arrowFinder, findsOneWidget);
-            final arrowIcon = tester.widget<Icon>(arrowFinder);
-            expect(arrowIcon.color, isNot(Colors.red));
-            expect(arrowIcon.color, isNot(Colors.green));
           }
 
           await scrollToAndVerify(
@@ -314,14 +320,15 @@ void main() {
             expectedColor: Colors.grey,
           );
 
-          // Tapping aggregated item still opens detail dialog with raw events
+          // Tapping aggregated item still opens detail dialog with exact raw events count
           await tester.tap(find.text('unk.example.org'));
           await tester.pumpAndSettle();
           expect(find.text('原始事件详情:'), findsOneWidget);
+          expect(find.textContaining('重复 2 次'), findsOneWidget);
           await tester.tap(find.text('关闭'));
           await tester.pumpAndSettle();
 
-          // Toggle "聚合重复" -> "原始逐条" and verify same status appears on LogTile!
+          // Toggle "聚合重复" -> "原始逐条" and verify same status appears on LogTile (count=1 -> no ×N)
           await tester.tap(find.text('聚合重复'));
           await tester.pumpAndSettle();
           expect(find.text('原始逐条'), findsOneWidget);
@@ -329,39 +336,153 @@ void main() {
           await tester.scrollUntilVisible(
             find.text('ads.example.com').first,
             -250,
-            scrollable: find.byType(Scrollable).last,
+            scrollable: find.byWidgetPredicate(
+              (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+            ),
           );
           await tester.pumpAndSettle();
           expect(find.text('已拦截\n黑名单'), findsWidgets);
+          expect(find.text('×2'), findsNothing);
           expect(find.byIcon(Icons.expand_more_rounded), findsNothing);
         }, _PassthroughHttpOverrides());
       });
     });
 
-    testWidgets('3b, 5, 6. predictedBlocked stays processed, narrow screen + huge textScaler + long domain has zero overflow, dark mode & useThemeColorForStatus preserved', (tester) async {
+    testWidgets('2. Repeat counts 2, 8, 100, 10000 format properly, detail dialog retains exact count, semantics complete', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
 
       await tester.runAsync(() async {
         await HttpOverrides.runWithHttpOverrides(() async {
           const ts = '2026-11-17T01:05:00.000Z';
-          // Emulate AdGuard paused protection event: reason=NotFilteredNotFound, but rule was blocking!
-          final pausedEvent = <String, dynamic>{
-            'time': ts,
-            'reason': 'NotFilteredNotFound',
-            'client': '127.0.0.1',
-            'elapsedMs': '1.0',
-            'cached': false,
-            'upstream': '',
-            'predicted_blocked': true,
-            'question': {
-              'type': 'A',
-              'name': 'very-very-long-subdomain-that-should-ellipsize-cleanly.example.co.uk',
-              'class': 'IN',
-            },
-            'rules': [{'text': '||very-very-long-subdomain-that-should-ellipsize-cleanly.example.co.uk^', 'filter_list_id': 1}],
-            'answer': <dynamic>[],
-          };
+          final countLogs = <Map<String, dynamic>>[
+            // 2 events
+            for (var i = 0; i < 2; i++)
+              _logJson(domain: 'count2.example.com', reason: 'FilteredBlackList', timeIso: ts),
+            // 8 events
+            for (var i = 0; i < 8; i++)
+              _logJson(domain: 'count8.example.com', reason: 'FilteredSNI', qtype: 'SNI', clientProto: 'sni', timeIso: ts),
+            // 100 events
+            for (var i = 0; i < 100; i++)
+              _logJson(domain: 'count100.example.com', reason: 'NotFilteredNotFound', timeIso: ts),
+          ];
+
+          final httpSrv = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          addTearDown(() => httpSrv.close(force: true));
+          httpSrv.listen((req) async {
+            if (req.uri.path == '/control/querylog') {
+              req.response
+                ..statusCode = 200
+                ..headers.contentType = ContentType.json
+                ..write(jsonEncode({'data': countLogs, 'oldest': ts}));
+            } else if (req.uri.path == '/control/filtering/status') {
+              req.response
+                ..statusCode = 200
+                ..headers.contentType = ContentType.json
+                ..write(jsonEncode({
+                  'filters': <dynamic>[],
+                  'whitelist_filters': <dynamic>[],
+                  'user_rules': <dynamic>[],
+                  'interval': 24,
+                  'enabled': true,
+                }));
+            } else {
+              req.response.statusCode = 404;
+            }
+            await req.response.close();
+          });
+
+          final srv = Server(
+            id: 'counts-srv',
+            name: 'CountsMock',
+            connectionMethod: 'http',
+            domain: '127.0.0.1',
+            port: httpSrv.port,
+            defaultServer: true,
+            runningOnHa: false,
+          );
+          final sp = ServersProvider()
+            ..setSelectedServer(srv)
+            ..setApiClient2(ApiClientV2(server: srv));
+          final fp = FilteringProvider()..update(sp, null);
+          final lp = LogsProvider()..update(sp);
+          final statusP = StatusProvider()..update(sp);
+          final cfg = AppConfigProvider(sharedPreferencesInstance: prefs);
+
+          await tester.pumpWidget(
+            MultiProvider(
+              providers: [
+                ChangeNotifierProvider.value(value: sp),
+                ChangeNotifierProvider.value(value: fp),
+                ChangeNotifierProvider.value(value: lp),
+                ChangeNotifierProvider.value(value: statusP),
+                ChangeNotifierProvider.value(value: cfg),
+              ],
+              child: const MaterialApp(
+                locale: Locale('zh'),
+                localizationsDelegates: AppLocalizations.localizationsDelegates,
+                supportedLocales: AppLocalizations.supportedLocales,
+                home: Logs(),
+              ),
+            ),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          await tester.pumpAndSettle();
+
+          final scrollable = find.byWidgetPredicate(
+            (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+          );
+
+          // Verify count 2 -> '×2', detail dialog has '重复 2 次'
+          expect(find.text('count2.example.com'), findsOneWidget);
+          expect(find.text('×2'), findsOneWidget);
+          await tester.tap(find.text('count2.example.com'));
+          await tester.pumpAndSettle();
+          expect(find.textContaining('重复 2 次'), findsOneWidget);
+          await tester.tap(find.text('关闭'));
+          await tester.pumpAndSettle();
+
+          // Verify count 8 -> '×8', detail dialog has '重复 8 次'
+          await tester.scrollUntilVisible(find.text('count8.example.com'), 120, scrollable: scrollable);
+          await tester.pumpAndSettle();
+          expect(find.text('×8'), findsOneWidget);
+          await tester.tap(find.text('count8.example.com'));
+          await tester.pumpAndSettle();
+          expect(find.textContaining('重复 8 次'), findsOneWidget);
+          await tester.tap(find.text('关闭'));
+          await tester.pumpAndSettle();
+
+          // Verify count 100 -> '×100', detail dialog has '重复 100 次'
+          await tester.scrollUntilVisible(find.text('count100.example.com'), 120, scrollable: scrollable);
+          await tester.pumpAndSettle();
+          expect(find.text('×100'), findsOneWidget);
+          await tester.tap(find.text('count100.example.com'));
+          await tester.pumpAndSettle();
+          expect(find.textContaining('重复 100 次'), findsOneWidget);
+          await tester.tap(find.text('关闭'));
+          await tester.pumpAndSettle();
+
+          // Verify count 10000 -> compact '×10k' formatting
+          expect(LogStatusIndicator.formatRepeatCount(10000), '×10k');
+          expect(LogStatusIndicator.formatRepeatCount(10500), '×10.5k');
+        }, _PassthroughHttpOverrides());
+      });
+    });
+
+    testWidgets('3. predictedBlocked stays processed, narrow screen + huge textScaler + long domain has zero overflow, left width gained', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      await tester.runAsync(() async {
+        await HttpOverrides.runWithHttpOverrides(() async {
+          const ts = '2026-11-17T01:05:00.000Z';
+          final pausedEvent = _logJson(
+            domain: 'very-very-long-subdomain-that-should-ellipsize-cleanly.example.co.uk',
+            reason: 'NotFilteredNotFound',
+            timeIso: ts,
+            predictedBlocked: true,
+            rules: [{'text': '||very-very-long-subdomain-that-should-ellipsize-cleanly.example.co.uk^', 'filter_list_id': 1}],
+          );
 
           final httpSrv = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
           addTearDown(() => httpSrv.close(force: true));
@@ -438,7 +559,6 @@ void main() {
           await Future<void>.delayed(const Duration(milliseconds: 100));
           await tester.pumpAndSettle();
 
-          // Paused protection MUST render processed (using theme primary color, NEVER red "已拦截")
           final indFinder = find.byType(LogStatusIndicator);
           expect(indFinder, findsOneWidget);
           expect(find.descendant(of: indFinder, matching: find.text('已处理\n无拦截')), findsOneWidget);
@@ -447,11 +567,17 @@ void main() {
             find.descendant(of: indFinder, matching: find.byIcon(Icons.verified_user_rounded)),
           );
           expect(processedIcon.color, isNot(Colors.red));
-          expect(find.descendant(of: indFinder, matching: find.byIcon(Icons.expand_more_rounded)), findsOneWidget);
+          expect(find.descendant(of: indFinder, matching: find.text('×2')), findsOneWidget);
+          expect(find.byIcon(Icons.expand_more_rounded), findsNothing);
           expect(tester.takeException(), isNull);
 
+          // Check that the left-side text area gained space (width is > 160px on 300px screen)
+          final domainTextFinder = find.text('very-very-long-subdomain-that-should-ellipsize-cleanly.example.co.uk');
+          final domainRect = tester.getRect(domainTextFinder);
+          expect(domainRect.width, greaterThan(160.0));
+
           // Tap aggregated row to verify predictedBlocked detail note is preserved
-          await tester.tap(find.text('very-very-long-subdomain-that-should-ellipsize-cleanly.example.co.uk'));
+          await tester.tap(domainTextFinder);
           await tester.pumpAndSettle();
           expect(find.textContaining('因保护暂停实际已放行'), findsOneWidget);
           await tester.tap(find.text('关闭'));
@@ -469,7 +595,7 @@ void main() {
                 home: const Scaffold(
                   body: LogStatusIndicator(
                     reason: 'FilteredBlackList',
-                    showExpandArrow: true,
+                    repeatCount: 5,
                   ),
                 ),
               ),
@@ -479,7 +605,8 @@ void main() {
           final blkIcon = tester.widget<Icon>(find.byIcon(Icons.gpp_bad_rounded));
           expect(blkIcon.color, Colors.grey);
           expect(find.text('已拦截\n黑名单'), findsOneWidget);
-          expect(find.byIcon(Icons.expand_more_rounded), findsOneWidget);
+          expect(find.text('×5'), findsOneWidget);
+          expect(find.byIcon(Icons.expand_more_rounded), findsNothing);
         }, _PassthroughHttpOverrides());
       });
     });
@@ -518,34 +645,28 @@ void main() {
       final cfg = AppConfigProvider(sharedPreferencesInstance: prefs);
       const ts = '2026-11-17T01:10:00.000Z';
 
-      // Alternate single rows (rendered by LogTile) and repeated duplicate pairs
-      // (rendered by _AggregatedLogsPageTile) in the same ListView.
+      // Alternate single rows (rendered by LogTile, count=1) and repeated duplicate pairs
+      // (rendered by _AggregatedLogsPageTile, count=2) in the same ListView.
       final queryLogs = <Map<String, dynamic>>[
         // Row 1 (single): FilteredBlackList
         _logJson(
           domain: 'single-blk-verylong-domain-name-example.doubleclick.net',
           reason: 'FilteredBlackList',
           timeIso: ts,
-          rules: [
-            {'text': '||doubleclick.net^', 'filter_list_id': 1},
-          ],
+          rules: [{'text': '||doubleclick.net^', 'filter_list_id': 1}],
         ),
         // Row 2 (aggregated x2): FilteredBlackList
         _logJson(
           domain: 'dup-blk.tracker.example.com',
           reason: 'FilteredBlackList',
           timeIso: ts,
-          rules: [
-            {'text': '||dup-blk.tracker.example.com^', 'filter_list_id': 1},
-          ],
+          rules: [{'text': '||dup-blk.tracker.example.com^', 'filter_list_id': 1}],
         ),
         _logJson(
           domain: 'dup-blk.tracker.example.com',
           reason: 'FilteredBlackList',
           timeIso: ts,
-          rules: [
-            {'text': '||dup-blk.tracker.example.com^', 'filter_list_id': 1},
-          ],
+          rules: [{'text': '||dup-blk.tracker.example.com^', 'filter_list_id': 1}],
         ),
         // Row 3 (single): NotFilteredNotFound
         _logJson(
@@ -571,9 +692,7 @@ void main() {
           qtype: 'SNI',
           clientProto: 'sni',
           timeIso: ts,
-          rules: [
-            {'text': '||single-sni-blk.example.net^', 'filter_list_id': 1},
-          ],
+          rules: [{'text': '||single-sni-blk.example.net^', 'filter_list_id': 1}],
         ),
         // Row 6 (aggregated x2): FilteredSNI
         _logJson(
@@ -582,9 +701,7 @@ void main() {
           qtype: 'SNI',
           clientProto: 'sni',
           timeIso: ts,
-          rules: [
-            {'text': '||dup-sni-blk.example.net^', 'filter_list_id': 1},
-          ],
+          rules: [{'text': '||dup-sni-blk.example.net^', 'filter_list_id': 1}],
         ),
         _logJson(
           domain: 'dup-sni-blk.example.net',
@@ -592,9 +709,7 @@ void main() {
           qtype: 'SNI',
           clientProto: 'sni',
           timeIso: ts,
-          rules: [
-            {'text': '||dup-sni-blk.example.net^', 'filter_list_id': 1},
-          ],
+          rules: [{'text': '||dup-sni-blk.example.net^', 'filter_list_id': 1}],
         ),
         // Row 7 (single): NotFilteredSNI
         _logJson(
@@ -727,7 +842,6 @@ void main() {
       ];
 
       final measuredCenters = <double>[];
-      final measuredArrowCenters = <double>[];
 
       for (final row in expectedRows) {
         final dFinder = find.text(row.domain);
@@ -748,17 +862,11 @@ void main() {
           of: indicator,
           matching: find.byKey(LogStatusIndicator.statusAreaKey),
         );
-        final arrowSlot = find.descendant(
-          of: indicator,
-          matching: find.byKey(LogStatusIndicator.arrowSlotKey),
-        );
         expect(statusArea, findsOneWidget);
-        expect(arrowSlot, findsOneWidget);
 
         final statusRect = tester.getRect(statusArea);
-        final arrowRect = tester.getRect(arrowSlot);
         final statusIconFinder = find.descendant(of: statusArea, matching: find.byType(Icon));
-        final statusTextFinder = find.descendant(of: statusArea, matching: find.byType(Text));
+        final statusTextFinder = find.descendant(of: statusArea, matching: find.byType(Text)).first;
         final statusIconWidget = tester.widget<Icon>(statusIconFinder);
         final statusTextWidget = tester.widget<Text>(statusTextFinder);
         expect((statusTextWidget.data ?? '').trim(), isNotEmpty);
@@ -773,35 +881,39 @@ void main() {
           lessThanOrEqualTo(0.01),
         );
         expect(statusIconWidget.size, 14);
-        expect(arrowRect.width, closeTo(LogStatusIndicator.arrowSlotWidth, 0.01));
 
-        // Arrow present ONLY on aggregated rows, empty same-width slot on normal rows
-        final arrowIcon = find.descendant(
-          of: arrowSlot,
-          matching: find.byIcon(Icons.expand_more_rounded),
+        // Repeat count indicator: present only on aggregated rows
+        final repeatCountFinder = find.descendant(
+          of: statusArea,
+          matching: find.byKey(LogStatusIndicator.repeatCountKey),
         );
-        expect(arrowIcon, row.aggregated ? findsOneWidget : findsNothing);
+        expect(repeatCountFinder, row.aggregated ? findsOneWidget : findsNothing);
+
+        // Subtitle does NOT contain redundant '重复' text
+        final subtitleTextFinders = find.descendant(
+          of: tileInkWell,
+          matching: find.textContaining('重复'),
+        );
+        expect(subtitleTextFinders, findsNothing);
 
         measuredCenters.add(statusRect.center.dx);
-        measuredArrowCenters.add(arrowRect.center.dx);
         debugPrint(
           '[$captureTag] aggregated=${row.aggregated} domain=${row.domain} '
           'statusRect=${statusRect.left.toStringAsFixed(1)}..${statusRect.right.toStringAsFixed(1)} '
           'centerX=${statusRect.center.dx.toStringAsFixed(2)} '
-          'arrowX=${arrowRect.center.dx.toStringAsFixed(2)} '
+          'width=${statusRect.width.toStringAsFixed(1)} '
           'label=${(statusTextWidget.data ?? '').replaceAll('\n', '/')}',
         );
       }
 
-      // Every normal & aggregated row shares the exact same statusArea center X and arrowSlot center X
+      // Every normal & aggregated row shares the exact same statusArea center X
       final baseCenter = measuredCenters.first;
-      final baseArrowCenter = measuredArrowCenters.first;
       for (final x in measuredCenters) {
         expect((x - baseCenter).abs(), lessThanOrEqualTo(0.01));
       }
-      for (final ax in measuredArrowCenters) {
-        expect((ax - baseArrowCenter).abs(), lessThanOrEqualTo(0.01));
-      }
+
+      // Entire list must have NO expand arrows
+      expect(find.byIcon(Icons.expand_more_rounded), findsNothing);
 
       // Capture screenshot from top of list (showing SNI & DNS normal+aggregated mix)
       await tester.scrollUntilVisible(
@@ -860,7 +972,7 @@ void main() {
           await runMixedAlignmentCase(
             tester,
             locale: const Locale('zh'),
-            viewportSize: const Size(820, 1520), // 410x760 @ dpr 2.0 when capturePreview=true
+            viewportSize: const Size(820, 1520),
             textScale: 1.0,
             captureTag: 'zh-410',
             capturePreview: true,
@@ -890,55 +1002,64 @@ void main() {
       });
     });
 
-    testWidgets('Toggling showExpandArrow preserves exact statusArea coordinates', (tester) async {
+    testWidgets('Accessibility semantics for normal (count=1) and aggregated (count>1) across zh and en', (tester) async {
+      final handle = tester.ensureSemantics();
+
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final cfg = AppConfigProvider(sharedPreferencesInstance: prefs);
 
-      Widget buildIndicatorRow({required bool showArrow}) {
+      Widget buildWidget({required Locale locale, required int repeatCount}) {
         return ChangeNotifierProvider<AppConfigProvider>.value(
           value: cfg,
           child: MaterialApp(
-            locale: const Locale('zh'),
+            locale: locale,
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
-              body: SizedBox(
-                width: 380,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Expanded(child: Text('example.com')),
-                      const SizedBox(width: 10),
-                      LogStatusIndicator(
-                        reason: 'FilteredSNI',
-                        showExpandArrow: showArrow,
-                      ),
-                    ],
-                  ),
-                ),
+              body: LogStatusIndicator(
+                reason: 'FilteredBlackList',
+                repeatCount: repeatCount,
               ),
             ),
           ),
         );
       }
 
-      await tester.pumpWidget(buildIndicatorRow(showArrow: false));
+      // Chinese count=1
+      await tester.pumpWidget(buildWidget(locale: const Locale('zh'), repeatCount: 1));
       await tester.pumpAndSettle();
-      final beforeRect = tester.getRect(find.byKey(LogStatusIndicator.statusAreaKey));
-      expect(find.byIcon(Icons.expand_more_rounded), findsNothing);
+      expect(
+        find.bySemanticsLabel('已拦截 黑名单，点按查看详情'),
+        findsOneWidget,
+      );
 
-      await tester.pumpWidget(buildIndicatorRow(showArrow: true));
+      // Chinese count=8
+      await tester.pumpWidget(buildWidget(locale: const Locale('zh'), repeatCount: 8));
       await tester.pumpAndSettle();
-      final afterRect = tester.getRect(find.byKey(LogStatusIndicator.statusAreaKey));
-      expect(find.byIcon(Icons.expand_more_rounded), findsOneWidget);
+      expect(
+        find.bySemanticsLabel('已拦截 黑名单，重复 8 次，点按查看详情'),
+        findsOneWidget,
+      );
 
-      expect(afterRect.left, closeTo(beforeRect.left, 0.01));
-      expect(afterRect.right, closeTo(beforeRect.right, 0.01));
-      expect(afterRect.width, closeTo(beforeRect.width, 0.01));
-      expect(afterRect.center.dx, closeTo(beforeRect.center.dx, 0.01));
+      // English count=1
+      await tester.pumpWidget(buildWidget(locale: const Locale('en'), repeatCount: 1));
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel('Blocked Blacklist, tap to view details'),
+        findsOneWidget,
+      );
+
+      // English count=10000
+      await tester.pumpWidget(buildWidget(locale: const Locale('en'), repeatCount: 10000));
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel('Blocked Blacklist, repeated 10000 times, tap to view details'),
+        findsOneWidget,
+      );
+      expect(find.text('×10k'), findsOneWidget);
+
+      handle.dispose();
     });
   });
 }
