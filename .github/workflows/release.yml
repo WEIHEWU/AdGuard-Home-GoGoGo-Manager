@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v2.24.27-rc.1" ;;
+            *)  VERSION_TAG="v2.24.27" ;;
           esac
           case "$VERSION_TAG" in
             *-rc*|*beta*|*candidate*) IS_PRERELEASE="true"; MAKE_LATEST="false"; TITLE_SUFFIX=" (Pre-release)" ;;
@@ -48,11 +48,12 @@ jobs:
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            > ⚠️ **验证与实机状态说明**：Manager 静态分析（`flutter analyze --no-fatal-infos`）、48 项单元与 Widget 测试（含“聚合重复”状态展示、多态 reason / predicted_blocked / 窄屏大字体防溢出 / 深色与主题色测试）及 APK 签名包体核验已通过；本端环境未连接实机（`adb devices -l` 为空），实机端到端交互验收待实机检验。
+            > ⚠️ **验证与实机状态说明**：Manager 静态分析（`flutter analyze --no-fatal-infos`）、48 项单元与 Widget 测试及 APK 签名包体核验已通过；本端环境未连接实机（`adb devices -l` 为空），候选版以来的真机视觉与端到端交互验收尚未在实机执行，升级后请以实际设备展示为准。
 
-            #### 主要修复（基于 `v2.24.26`）
-            - **修复日志“聚合重复”条目右侧状态缺失**：抽出共用状态组件 `LogStatusIndicator`，普通日志与聚合日志统一复用 `getFilteredStatus()`。
-            - **严格按 `group.reason` 渲染状态并保留展开箭头**：聚合条目右侧并排显示 `[状态图标+文字] [展开箭头]`，`Rewrite*` 统一归类，未触发拦截的 `predicted_blocked` 暂停放行保持已处理展示并在详情弹窗保留预测说明，点击仍可正常展开详细记录弹窗。
-            - **保持核心与策略不变**：沿用 `v2026-11-16-rc.3` 核心、既定规则订阅、SNI 检查与手动规则来源逻辑；此候选版本为预发布，保留 `v2.24.26` 为当前 Latest 稳定版。
+            #### 小范围修复说明
+            修复日志页面开启“聚合重复”后，重复条目右侧缺少状态图标与文字的问题。聚合日志与普通日志现在统一显示实际处理状态，并保留查看详情的箭头。Core、规则和过滤策略保持不变。
+
+            #### 升级提示
+            - 本次仅为管理器 UI 修复；如您已安装 `v20261117.1` 模块，仅覆盖安装新版 Manager APK（`2.24.27+195`）即可生效，无需重刷模块或重启 Core。
           files: |
             releases/AdGuardHomeManager.apk
