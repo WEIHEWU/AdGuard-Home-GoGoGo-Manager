@@ -6,6 +6,7 @@ import 'package:adguard_home_manager/l10n/app_localizations.dart';
 
 import 'package:adguard_home_manager/screens/logs/log_tile.dart';
 import 'package:adguard_home_manager/widgets/floating_search_bar.dart';
+import 'package:adguard_home_manager/widgets/log_status_indicator.dart';
 import 'package:adguard_home_manager/widgets/rule_provenance_badge.dart';
 import 'package:adguard_home_manager/constants/enums.dart';
 import 'package:adguard_home_manager/functions/copy_clipboard.dart';
@@ -326,155 +327,196 @@ class _AggregatedLogsPageTile extends StatelessWidget {
         ? '${group.matchedRules.first.sourceName}: ${group.matchedRules.first.text}'
         : group.reason;
 
-    return ListTile(
-      onTap: () {
-        showDialog(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: Text(group.domain, style: const TextStyle(fontSize: 15.5)),
-            content: SizedBox(
-              width: double.maxFinite,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('来源: $protoLabel · reason=${group.reason} · 重复 ${group.count} 次'),
-                    if (group.matchedRules.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      const Text('命中规则:', style: TextStyle(fontWeight: FontWeight.w600)),
-                      for (final r in group.matchedRules)
-                        Builder(
-                          builder: (builderCtx) {
-                            String? srvKey;
-                            try {
-                              srvKey = ManualRuleProvenanceService
-                                  .serverKeyForNullable(
-                                Provider.of<ServersProvider>(builderCtx,
-                                        listen: false)
-                                    .selectedServer,
+    final hasPredictedBlocked = group.rawEvents.any((e) => e.predictedBlocked);
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: Text(group.domain, style: const TextStyle(fontSize: 15.5)),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('来源: $protoLabel · reason=${group.reason} · 重复 ${group.count} 次'),
+                      if (hasPredictedBlocked) ...[
+                        const SizedBox(height: 4),
+                        const Text(
+                          '规则预测: 规则命中阻断，但因保护暂停实际已放行',
+                          style: TextStyle(fontSize: 12, color: Colors.orange),
+                        ),
+                      ],
+                      if (group.matchedRules.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        const Text('命中规则:', style: TextStyle(fontWeight: FontWeight.w600)),
+                        for (final r in group.matchedRules)
+                          Builder(
+                            builder: (builderCtx) {
+                              String? srvKey;
+                              try {
+                                srvKey = ManualRuleProvenanceService
+                                    .serverKeyForNullable(
+                                  Provider.of<ServersProvider>(builderCtx,
+                                          listen: false)
+                                      .selectedServer,
+                                );
+                              } catch (_) {
+                                srvKey = null;
+                              }
+                              final disp = ManualRuleProvenanceService.instance
+                                  .resolveMatchedRuleDisplay(
+                                serverKey: srvKey,
+                                ruleText: r.text,
+                                filterListId: r.filterListId,
+                                subscriptionDisplayName: r.sourceName,
                               );
-                            } catch (_) {
-                              srvKey = null;
-                            }
-                            final disp = ManualRuleProvenanceService.instance
-                                .resolveMatchedRuleDisplay(
-                              serverKey: srvKey,
-                              ruleText: r.text,
-                              filterListId: r.filterListId,
-                              subscriptionDisplayName: r.sourceName,
-                            );
-                            return Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  RuleProvenanceBadge(
-                                    compact: true,
-                                    display: disp,
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    r.text,
-                                    style: const TextStyle(
-                                      fontFamily: 'monospace',
-                                      fontSize: 12,
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    RuleProvenanceBadge(
+                                      compact: true,
+                                      display: disp,
                                     ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      r.text,
+                                      style: const TextStyle(
+                                        fontFamily: 'monospace',
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                      ],
+                      const SizedBox(height: 10),
+                      const Text('原始事件详情:', style: TextStyle(fontWeight: FontWeight.w600)),
+                      for (final raw in group.rawEvents.take(20))
+                        Padding(
+                          padding: const EdgeInsets.only(top: 3),
+                          child: Text(
+                            '${convertTimestampLocalTimezone(raw.time, "HH:mm:ss.SSS")} · client=${raw.client}${raw.destination?.isNotEmpty == true ? " · dst=${raw.destination}" : ""}',
+                            style: const TextStyle(fontSize: 11.5),
+                          ),
+                        ),
+                      if (group.rawEvents.length > 20)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text('仅展示前 20 条（共 ${group.rawEvents.length} 条）',
+                              style: TextStyle(fontSize: 11, color: colorScheme.onSurfaceVariant)),
                         ),
                     ],
-                    const SizedBox(height: 10),
-                    const Text('原始事件详情:', style: TextStyle(fontWeight: FontWeight.w600)),
-                    for (final raw in group.rawEvents.take(20))
-                      Padding(
-                        padding: const EdgeInsets.only(top: 3),
-                        child: Text(
-                          '${convertTimestampLocalTimezone(raw.time, "HH:mm:ss.SSS")} · client=${raw.client}${raw.destination?.isNotEmpty == true ? " · dst=${raw.destination}" : ""}',
-                          style: const TextStyle(fontSize: 11.5),
-                        ),
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    copyToClipboard(
+                      value: group.domain,
+                      successMessage: AppLocalizations.of(context)!.copiedClipboard,
+                    );
+                  },
+                  child: Text(AppLocalizations.of(context)!.copyClipboard),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('关闭'),
+                ),
+              ],
+            ),
+          );
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      group.domain,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 15,
+                        height: 1.3,
+                        fontWeight: FontWeight.w500,
+                        color: colorScheme.onSurface,
                       ),
-                    if (group.rawEvents.length > 20)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Text('仅展示前 20 条（共 ${group.rawEvents.length} 条）',
-                            style: TextStyle(fontSize: 11, color: colorScheme.onSurfaceVariant)),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 5, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: badgeColor.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              protoLabel,
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.bold,
+                                color: badgeColor,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              '$timeStr · 重复 ${group.count} 次',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: colorScheme.onSurfaceVariant,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              '· $ruleHint',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: colorScheme.onSurfaceVariant,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
+                    ),
                   ],
                 ),
               ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  copyToClipboard(
-                    value: group.domain,
-                    successMessage: AppLocalizations.of(context)!.copiedClipboard,
-                  );
-                },
-                child: Text(AppLocalizations.of(context)!.copyClipboard),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('关闭'),
+              const SizedBox(width: 10),
+              LogStatusIndicator(
+                reason: group.reason,
+                showExpandArrow: true,
               ),
             ],
           ),
-        );
-      },
-      title: Text(
-        group.domain,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
-      ),
-      subtitle: Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: badgeColor.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                protoLabel,
-                style: TextStyle(
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.bold,
-                  color: badgeColor,
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              '$timeStr · 重复 ${group.count} 次',
-              style: TextStyle(
-                color: colorScheme.onSurfaceVariant,
-                fontSize: 12,
-              ),
-            ),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                '· $ruleHint',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: colorScheme.onSurfaceVariant,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ],
         ),
       ),
-      trailing: const Icon(Icons.expand_more_rounded, size: 18),
     );
   }
 }

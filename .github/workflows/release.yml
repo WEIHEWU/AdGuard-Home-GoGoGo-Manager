@@ -20,28 +20,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve Release Metadata
+        run: |
+          case "${GITHUB_REF_NAME:-}" in
+            v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
+            *)  VERSION_TAG="v2.24.27-rc.1" ;;
+          esac
+          case "$VERSION_TAG" in
+            *-rc*|*beta*|*candidate*) IS_PRERELEASE="true"; MAKE_LATEST="false"; TITLE_SUFFIX=" (Pre-release)" ;;
+            *)                       IS_PRERELEASE="false"; MAKE_LATEST="true"; TITLE_SUFFIX="" ;;
+          esac
+          echo "VERSION_TAG=$VERSION_TAG" >> "$GITHUB_ENV"
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> "$GITHUB_ENV"
+          echo "MAKE_LATEST=$MAKE_LATEST" >> "$GITHUB_ENV"
+          echo "TITLE_SUFFIX=$TITLE_SUFFIX" >> "$GITHUB_ENV"
+
       - name: Create GitHub Release and Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name == 'main' && 'v2.24.26' || github.ref_name }}
-          name: "AdGuard-Home-GoGoGo Manager ${{ github.ref_name == 'main' && 'v2.24.26' || github.ref_name }}"
+          tag_name: ${{ env.VERSION_TAG }}
+          name: "AdGuard-Home-GoGoGo Manager ${{ env.VERSION_TAG }}${{ env.TITLE_SUFFIX }}"
           draft: false
-          prerelease: false
-          make_latest: true
+          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
+          make_latest: ${{ env.MAKE_LATEST }}
           body: |
-            ### AdGuard-Home-GoGoGo Manager `v2.24.26`
+            ### AdGuard-Home-GoGoGo Manager `${{ env.VERSION_TAG }}`
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            > ⚠️ **验证与实机状态说明**：Core（Linux ARM64、`android_slim`、`race`/单元测试）、Manager 静态分析与 46 项单元/Widget/本地模拟 HTTP 回归测试、APK 签名及包体核验已通过；本端环境未连接实机（`adb devices -l` 为空），完整实机端到端交互验收待实机检验。
+            > ⚠️ **验证与实机状态说明**：Manager 静态分析（`flutter analyze --no-fatal-infos`）、48 项单元与 Widget 测试（含“聚合重复”状态展示、多态 reason / predicted_blocked / 窄屏大字体防溢出 / 深色与主题色测试）及 APK 签名包体核验已通过；本端环境未连接实机（`adb devices -l` 为空），实机端到端交互验收待实机检验。
 
-            #### 主要更新与功能特性
-            - **模式切换及 Android `flock` 兼容修复**：父 Shell 统一初始化单调时钟记录各切换阶段耗时，消除重复配置校验，单次 `post_apply_check` 核对 `443`/`8443` NFQUEUE 与 `--queue-bypass`、`GID 23333` 核心豁免，支持 Android 兼容的 `flock` 串行协调。
-            - **调试日志开关与脱敏诊断包导出**：默认关闭且支持定时自动关闭的模块详细调试日志（独立日志锁短事务轮转）；一键导出全链路脱敏诊断 ZIP（不收集手动规则备注/原文、DNS 查询历史与账号凭据）并调用系统分享。
-            - **实时误杀排错、SNI 记录及阻断聚合**：基于离线 PSL（ICANN + PRIVATE）实时查询 `A` / `AAAA` `/control/filtering/check_host`，补充核心 `FilteredSNI` 查询日志与同秒阻断聚合。
-            - **用户确认的分级放行与安全撤销**：由用户明确确认两级放行建议，`set_rules` 通过 `expected_revision` 与写后 `X-User-Rules-Revision` 回读绑定撤销凭证 防误删。
-            - **手动规则来源、备注和集中管理**：涵盖误杀排错、日志详情、自定义规则单条添加/批量编辑/移除全入口；区分“历史来源（手动新增/用户认领）”与“当前关联（已确认/已不存在/待确认/重复歧义）”；支持“我的手动规则”管理页、`检查是否生效` 与备份 JSON 导出/校验导入。
-
-            > ℹ️ **存储与关联说明**：手动来源记录和备注保存在管理器本地，正常升级及软重启应保持；卸载或清除应用数据可能丢失，请使用备份功能。核心重启或外部规则修改后，“当前关联”可能变为待确认，不代表规则被删除。
+            #### 主要修复（基于 `v2.24.26`）
+            - **修复日志“聚合重复”条目右侧状态缺失**：抽出共用状态组件 `LogStatusIndicator`，普通日志与聚合日志统一复用 `getFilteredStatus()`。
+            - **严格按 `group.reason` 渲染状态并保留展开箭头**：聚合条目右侧并排显示 `[状态图标+文字] [展开箭头]`，`Rewrite*` 统一归类，未触发拦截的 `predicted_blocked` 暂停放行保持已处理展示并在详情弹窗保留预测说明，点击仍可正常展开详细记录弹窗。
+            - **保持核心与策略不变**：沿用 `v2026-11-16-rc.3` 核心、既定规则订阅、SNI 检查与手动规则来源逻辑；此候选版本为预发布，保留 `v2.24.26` 为当前 Latest 稳定版。
           files: |
             releases/AdGuardHomeManager.apk

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:adguard_home_manager/l10n/app_localizations.dart';
 
+import 'package:adguard_home_manager/widgets/log_status_indicator.dart';
 import 'package:adguard_home_manager/widgets/options_menu.dart';
 import 'package:adguard_home_manager/widgets/rule_provenance_badge.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
@@ -267,20 +268,28 @@ class LogTile extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(width: 8),
-                          Text(
-                            convertTimestampLocalTimezone(log.time, 'HH:mm:ss'),
-                            style: TextStyle(
-                              color: colorScheme.onSurfaceVariant,
-                              fontSize: 12,
+                          Flexible(
+                            child: Text(
+                              convertTimestampLocalTimezone(log.time, 'HH:mm:ss'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: colorScheme.onSurfaceVariant,
+                                fontSize: 12,
+                              ),
                             ),
                           ),
                           if (elapsedText != null) ...[
                             const SizedBox(width: 8),
-                            Text(
-                              '· $elapsedText',
-                              style: TextStyle(
-                                color: colorScheme.onSurfaceVariant,
-                                fontSize: 12,
+                            Flexible(
+                              child: Text(
+                                '· $elapsedText',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: colorScheme.onSurfaceVariant,
+                                  fontSize: 12,
+                                ),
                               ),
                             ),
                           ],
@@ -305,27 +314,7 @@ class LogTile extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 10),
-              SizedBox(
-                width: 72,
-                child: Column(
-                  children: [
-                    Icon(
-                      filter['icon'],
-                      color: filter['color'],
-                      size: 14,
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      filter['label'],
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: filter['color'],
-                        fontSize: 11.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              LogStatusIndicator(reason: log.reason),
             ],
           ),
         ),

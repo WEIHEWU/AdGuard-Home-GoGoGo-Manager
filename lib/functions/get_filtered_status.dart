@@ -149,6 +149,14 @@ Map<String, dynamic> getFilteredStatus(BuildContext context, AppConfigProvider a
       };
 
     default:
+      if (filterKey.startsWith('Rewrite')) {
+        return {
+          'filtered': true,
+          'label': AppLocalizations.of(context)!.rewrite,
+          'color': Colors.blue,
+          'icon': Icons.shield_rounded,
+        };
+      }
       return {
         'filtered': null,
         'label': 'Unknown',
