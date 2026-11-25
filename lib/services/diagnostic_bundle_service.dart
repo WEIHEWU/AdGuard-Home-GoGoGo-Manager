@@ -817,13 +817,7 @@ for p in \$cand_pids; do
   if [ -d "/proc/\$p" ]; then
     echo "--- pid=\$p comm=\$(cat /proc/\$p/comm 2>/dev/null || echo unknown) ---"
     grep -E '^(Name|State|Pid|PPid|Gid|VmRSS|Threads):' "/proc/\$p/status" 2>/dev/null || true
-    for fdl in /proc/\$p/fd/*; do
-      [ -L "\$fdl" ] || continue
-      tgt=\$(readlink "\$fdl" 2>/dev/null || true)
-      case "\$tgt" in
-        *agh_*|*flock*) echo "  fd=\${fdl##*/} -> \$tgt" ;;
-      esac
-    done
+    ls -ln "/proc/\$p/fd" 2>/dev/null | grep -E 'agh_|flock' | awk '{for(i=1;i<=NF;i++) if(\$i=="->") print "  fd=" \$(i-1) " -> " \$(i+1)}' || true
   else
     echo "--- pid=\$p state=not_in_proc ---"
   fi

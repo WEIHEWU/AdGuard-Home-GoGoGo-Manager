@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v2.24.29" ;;
+            *)  VERSION_TAG="v2.24.30" ;;
           esac
           case "$VERSION_TAG" in
             *-rc*|*beta*|*candidate*) IS_PRERELEASE="true"; MAKE_LATEST="false"; TITLE_SUFFIX=" (Pre-release)" ;;
@@ -48,16 +48,13 @@ jobs:
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            > ✅ **验证状态**：`flutter analyze --no-pub --no-fatal-infos`（0 error / 0 warning）、全量 56 项单元与 Widget 测试及 `arm64-v8a` 混淆 Release APK（`2.24.29+199`，`8,873,878 B`，SHA-256: `d30e2725483f3d2420259efaaf2b867c55a6f86e3e86f1bae784718d02ad5640`）核验通过。
+            > ✅ **验证状态**：`flutter analyze --no-pub --no-fatal-infos`（0 error / 0 warning）、全量 56 项单元与 Widget 测试及 `arm64-v8a` 混淆 Release APK（`2.24.30+200`，`8,873,778 B`，SHA-256: `63994361c46e857c4321fca3cb002529debedbb37c60f084cb16ad9654b07663`）核验通过，并已完成真机诊断包全 8 项 `ok` 验收。
 
-            #### 本次正式版更新内容（可靠性、诊断导出与聚合日志增强）
-            - **诊断包默认保存至系统公共 `Download` 目录**：新增 `MediaStore.Downloads` 原生通道（Android 10+ 免存储权限直写公共 `Download/agh_diag_*.zip`，Android 9 及以下兼容公共目录并保留私有目录兜底），界面明确提示保存路径（`已保存至 Download/...`），同时保留系统分享入口。
-            - **诊断包采用设备本地时间命名**：`agh_diag_YYYYMMDD_HHMMSS_xxxx.zip`、`bundle_id` 与 `manifest.json` / `00_README_AND_MANIFEST.txt` 统一以设备本地时间生成并在正文同时记录 `generated_at_local`（含时区偏移）与 `generated_at_utc`。
-            - **诊断包版本号与只读隔离对齐**：统一通过 `AppConfigProvider.appVersion` 注入管理器版本，全量采集严格只读（耗时预算 20s，不抢占操作锁、不修改规则、不重启核心）。
-            - **聚合日志详情弹窗支持一键放行 / 拦截**：保持日志列表行紧凑对齐与右侧无额外按钮布局不变，在点击聚合日志后的详情弹窗 / 长按菜单内提供带 `$important` 的直接放行与拦截操作。
-            - **稳定性与并发队列加固**：修复挂起 `su` 进程超时后强制 `kill()` 回收并清空串行队列、强化恢复出厂规则 `getFiltering()` 失败防清空门控、同步等待动态端口就绪、清理各界面控制器泄露及有界化请求体读取与响应码透传。
+            #### 本次维护版更新内容
+            - **提速诊断包 `04_lock_diagnostics.txt` 采集**：将针对核心与看门狗 PID 的逐个 `readlink` 循环重构为单次 `ls -ln /proc/$p/fd | grep -E 'agh_|flock'`，消除百余个 socket/pipe FD 遍历造成的毫秒级拖慢，真机单步耗时从 `1,766 ms` 降至 **`237 ms`**。
+            - **沿用并巩固 `v2.24.29` 诊断增强**：保持公共 `Download/agh_diag_YYYYMMDD_HHMMSS_xxxx.zip`（设备本地时间命名）默认保存通道与 `manifest.json` 双时间戳、日志列表零布局改动、聚合详情一键放行/拦截及全部稳定性修复。
 
             #### 升级提示
-            - 覆盖安装 Manager APK（`2.24.29+199`）或直接刷入模块 `v20261125.1` 即可自动完成更新。
+            - 覆盖安装 Manager APK（`2.24.30+200`）或直接刷入模块 `v20261125.2` 即可自动完成更新。
           files: |
             releases/AdGuardHomeManager.apk
