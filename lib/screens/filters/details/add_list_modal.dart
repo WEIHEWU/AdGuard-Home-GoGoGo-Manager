@@ -125,6 +125,13 @@ class _ContentState extends State<_Content> {
   }
 
   @override
+  void dispose() {
+    nameController.dispose();
+    urlController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {    
     return Column(
       mainAxisSize: MainAxisSize.min,

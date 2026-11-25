@@ -105,13 +105,13 @@ class _ModuleQuickActionsState extends State<ModuleQuickActions> {
 
     final switchRes = await service.switchRunModeDetailed(targetMode);
     final refreshSw = Stopwatch()..start();
+    await _syncHttpAddressIfNeeded(
+      serversProvider,
+      appConfigProvider,
+      service,
+      hintHttpPort: switchRes.httpPort,
+    );
     await Future.wait([
-      _syncHttpAddressIfNeeded(
-        serversProvider,
-        appConfigProvider,
-        service,
-        hintHttpPort: switchRes.httpPort,
-      ),
       _loadDiagnostics(forceRefresh: true),
       statusProvider.getServerStatus(withLoadingIndicator: false),
       dnsProvider.fetchDnsData(showLoading: false),
@@ -955,6 +955,27 @@ class _FalsePositiveAssistantModalState
     }
   }
 
+  Future<List<R>> _runBounded<T, R>(
+    List<T> items,
+    Future<R> Function(T) task, {
+    int concurrency = 4,
+  }) async {
+    if (items.isEmpty) return <R>[];
+    final results = List<R?>.filled(items.length, null);
+    var nextIndex = 0;
+    final workerCount = items.length < concurrency ? items.length : concurrency;
+
+    Future<void> worker() async {
+      while (nextIndex < items.length) {
+        final idx = nextIndex++;
+        results[idx] = await task(items[idx]);
+      }
+    }
+
+    await Future.wait(List.generate(workerCount, (_) => worker()));
+    return results.cast<R>();
+  }
+
   Future<void> _diagnoseWebpage() async {
     final raw = _urlController.text.trim();
     if (raw.isEmpty || _diagnosingWeb) return;
@@ -981,7 +1002,7 @@ class _FalsePositiveAssistantModalState
       _webDiagnoseHint = '已提取 ${domains.length} 个关联域名，正在检测规则拦截状态…';
     });
 
-    final results = await Future.wait(domains.map(_checkSingleDomain));
+    final results = await _runBounded(domains, _checkSingleDomain, concurrency: 4);
     if (!mounted) return;
 
     results.sort((a, b) {
@@ -1095,7 +1116,7 @@ class _FalsePositiveAssistantModalState
       return;
     }
 
-    final checked = await Future.wait(domains.map(_checkSingleDomain));
+    final checked = await _runBounded(domains, _checkSingleDomain, concurrency: 4);
     if (!mounted) return;
 
     checked.sort((a, b) {

@@ -89,21 +89,18 @@ class _DnsSettingsState extends State<DnsSettings> {
     final switchRes = await service.switchRunModeDetailed(targetMode);
     final refreshSw = Stopwatch()..start();
     final currentAddr = appConfigProvider.moduleHttpAddress;
-    final portMatched = switchRes.httpPort != null &&
-        switchRes.httpPort! > 0 &&
-        currentAddr.isNotEmpty &&
-        currentAddr.endsWith(':${switchRes.httpPort}');
+    final hintAddr = (switchRes.httpPort != null && switchRes.httpPort! > 0)
+        ? '127.0.0.1:${switchRes.httpPort}'
+        : null;
+    final resolvedAddr = hintAddr ?? await service.readHttpAddress();
+    if (resolvedAddr != null &&
+        resolvedAddr.isNotEmpty &&
+        resolvedAddr != currentAddr) {
+      appConfigProvider.setModuleHttpAddress(resolvedAddr);
+      await serversProvider.autoConnectModule(resolvedAddr);
+    }
     var fetched = false;
     await Future.wait([
-      if (!portMatched)
-        service.readHttpAddress().then((addr) async {
-          if (addr != null &&
-              addr.isNotEmpty &&
-              addr != appConfigProvider.moduleHttpAddress) {
-            appConfigProvider.setModuleHttpAddress(addr);
-            await serversProvider.autoConnectModule(addr);
-          }
-        }),
       dnsProvider.fetchDnsData(showLoading: false).then((v) => fetched = v),
       filteringProvider.fetchFilters(showLoading: false),
       statusProvider.getServerStatus(withLoadingIndicator: false),

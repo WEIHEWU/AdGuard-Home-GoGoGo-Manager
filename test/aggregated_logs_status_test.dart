@@ -889,12 +889,30 @@ void main() {
         );
         expect(repeatCountFinder, row.aggregated ? findsOneWidget : findsNothing);
 
+        // Tightened spacing assertions:
+        final logicalWidth = tester.view.physicalSize.width / tester.view.devicePixelRatio;
+        // Right margin is exactly 10px from viewport right edge (status shifted right by 6px)
+        expect((logicalWidth - statusRect.right - 10.0).abs(), lessThanOrEqualTo(0.01));
+        // Left Column and statusArea have exactly 4px gap
+        final leftColumnFinder = find.ancestor(of: dFinder, matching: find.byType(Column)).first;
+        final leftColumnRect = tester.getRect(leftColumnFinder);
+        expect((statusRect.left - leftColumnRect.right - 4.0).abs(), lessThanOrEqualTo(0.01));
+        // Left margin of left column is 16px from viewport left edge
+        expect((leftColumnRect.left - 16.0).abs(), lessThanOrEqualTo(0.01));
+
         // Subtitle does NOT contain redundant '重复' text
         final subtitleTextFinders = find.descendant(
           of: tileInkWell,
           matching: find.textContaining('重复'),
         );
         expect(subtitleTextFinders, findsNothing);
+
+        // Subtitle displays $timeStr · $ruleSummary in expanded text
+        final subtitleFinder = find.descendant(
+          of: leftColumnFinder,
+          matching: find.textContaining('·'),
+        );
+        expect(subtitleFinder, findsOneWidget);
 
         measuredCenters.add(statusRect.center.dx);
         debugPrint(

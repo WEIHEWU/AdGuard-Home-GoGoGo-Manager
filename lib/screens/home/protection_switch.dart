@@ -29,9 +29,13 @@ class ProtectionSwitch extends StatelessWidget {
       time: time,
     );
     if (context.mounted && result == false) {
+      final isAuthError = statusProvider.lastBlockingStatusCode == 401 ||
+          statusProvider.lastBlockingStatusCode == 403;
       showSnackbar(
         appConfigProvider: appConfigProvider,
-        label: AppLocalizations.of(context)!.invalidUsernamePassword,
+        label: isAuthError
+            ? AppLocalizations.of(context)!.invalidUsernamePassword
+            : '操作失败：本地核心暂未就绪或连接超时',
         color: Colors.red,
       );
     }

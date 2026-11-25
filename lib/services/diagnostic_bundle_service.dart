@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'diagnostic_redactor.dart';
 import 'diagnostic_zip_builder.dart';
 import 'module_config_service.dart';
+import '../providers/app_config_provider.dart';
 
 class DiagnosticCancelToken {
   bool _cancelled = false;
@@ -53,10 +54,13 @@ class DiagnosticBundleResult {
   final bool cancelled;
   final bool partialSuccess;
   final String zipPath;
+  final String savedDisplayPath;
+  final bool savedToPublicDownloads;
   final String fileName;
   final int zipBytes;
   final String bundleId;
   final DateTime generatedAtUtc;
+  final DateTime? generatedAtLocal;
   final List<DiagnosticItemStatus> items;
   final String previewText;
   final String summaryText;
@@ -67,10 +71,13 @@ class DiagnosticBundleResult {
     this.cancelled = false,
     this.partialSuccess = false,
     this.zipPath = '',
+    this.savedDisplayPath = '',
+    this.savedToPublicDownloads = false,
     this.fileName = '',
     this.zipBytes = 0,
     this.bundleId = '',
     required this.generatedAtUtc,
+    this.generatedAtLocal,
     this.items = const <DiagnosticItemStatus>[],
     this.previewText = '',
     this.summaryText = '',
@@ -80,6 +87,10 @@ class DiagnosticBundleResult {
 
 typedef DiagCacheDirProvider = Future<String?> Function();
 typedef DiagShareInvoker = Future<bool> Function(String filePath, String title);
+typedef DiagDownloadsSaver
+    = Future<({bool saved, String displayPath, bool isPublicDownload})>
+        Function(String filePath, String fileName);
+typedef DiagNowProvider = DateTime Function();
 
 class DiagnosticBundleService {
   static const int maxZipBytes = 2 * 1024 * 1024; // 2 MiB
@@ -100,9 +111,31 @@ class DiagnosticBundleService {
     _activeExport = null;
   }
 
+  /// 将 DateTime 格式化为带本地时区偏移的 ISO-8601 字符串（如 +11:00）
+  static String formatIso8601WithOffset(DateTime dt) {
+    final y = dt.year.toString().padLeft(4, '0');
+    final mo = dt.month.toString().padLeft(2, '0');
+    final d = dt.day.toString().padLeft(2, '0');
+    final h = dt.hour.toString().padLeft(2, '0');
+    final mi = dt.minute.toString().padLeft(2, '0');
+    final s = dt.second.toString().padLeft(2, '0');
+    final ms = dt.millisecond.toString().padLeft(3, '0');
+    if (dt.isUtc) {
+      return '$y-$mo-${d}T$h:$mi:$s.${ms}Z';
+    }
+    final offset = dt.timeZoneOffset;
+    final sign = offset.isNegative ? '-' : '+';
+    final absMin = offset.inMinutes.abs();
+    final offH = (absMin ~/ 60).toString().padLeft(2, '0');
+    final offM = (absMin % 60).toString().padLeft(2, '0');
+    return '$y-$mo-${d}T$h:$mi:$s.$ms$sign$offH:$offM';
+  }
+
   final ModuleConfigService _moduleService;
   final DiagCacheDirProvider _cacheDirProvider;
   final DiagShareInvoker _shareInvoker;
+  final DiagDownloadsSaver _downloadsSaver;
+  final DiagNowProvider _nowProvider;
   final Duration _itemTimeout;
   final Duration _totalBudget;
 
@@ -110,11 +143,15 @@ class DiagnosticBundleService {
     ModuleConfigService? moduleService,
     DiagCacheDirProvider? cacheDirProvider,
     DiagShareInvoker? shareInvoker,
+    DiagDownloadsSaver? downloadsSaver,
+    DiagNowProvider? nowProvider,
     Duration itemTimeout = defaultItemTimeout,
     Duration totalBudget = totalCollectionBudget,
   })  : _moduleService = moduleService ?? ModuleConfigService(),
         _cacheDirProvider = cacheDirProvider ?? _defaultCacheDirProvider,
         _shareInvoker = shareInvoker ?? _defaultShareInvoker,
+        _downloadsSaver = downloadsSaver ?? _defaultDownloadsSaver,
+        _nowProvider = nowProvider ?? DateTime.now,
         _itemTimeout = itemTimeout,
         _totalBudget = totalBudget;
 
@@ -137,6 +174,28 @@ class DiagnosticBundleService {
     } catch (_) {
       return false;
     }
+  }
+
+  static Future<({bool saved, String displayPath, bool isPublicDownload})>
+      _defaultDownloadsSaver(String filePath, String fileName) async {
+    try {
+      final raw = await _diagChannel.invokeMethod<Map<Object?, Object?>>(
+        'saveDiagBundleToDownloads',
+        <String, dynamic>{'filePath': filePath, 'fileName': fileName},
+      );
+      if (raw != null && raw['saved'] == true) {
+        final displayPath = (raw['displayPath'] as String?) ?? '';
+        final isPublic = raw['isPublicDownload'] == true;
+        if (displayPath.isNotEmpty) {
+          return (
+            saved: true,
+            displayPath: displayPath,
+            isPublicDownload: isPublic,
+          );
+        }
+      }
+    } catch (_) {}
+    return (saved: true, displayPath: filePath, isPublicDownload: false);
   }
 
   /// 清理过期（>24h）及超出保留上限（最多 3 份）的缓存 ZIP，不删除刚生成或正在分享的包
@@ -201,7 +260,7 @@ class DiagnosticBundleService {
   /// 生成脱敏诊断包（单飞互斥：连续点击合并等待同一任务）
   Future<DiagnosticBundleResult> exportBundle({
     DiagnosticCancelToken? cancelToken,
-    String appVersion = '2.24.19',
+    String appVersion = AppConfigProvider.appVersion,
   }) {
     final existing = _activeExport;
     if (existing != null) {
@@ -225,16 +284,18 @@ class DiagnosticBundleService {
     required String appVersion,
   }) async {
     final totalSw = Stopwatch()..start();
-    final startTime = DateTime.now().toUtc();
+    final localNow = _nowProvider();
+    final utcNow = localNow.toUtc();
+    final localIso = formatIso8601WithOffset(localNow);
     final randHex =
         Random().nextInt(0xFFFF).toRadixString(16).padLeft(4, '0');
     final stamp =
-        '${startTime.year.toString().padLeft(4, '0')}'
-        '${startTime.month.toString().padLeft(2, '0')}'
-        '${startTime.day.toString().padLeft(2, '0')}_'
-        '${startTime.hour.toString().padLeft(2, '0')}'
-        '${startTime.minute.toString().padLeft(2, '0')}'
-        '${startTime.second.toString().padLeft(2, '0')}';
+        '${localNow.year.toString().padLeft(4, '0')}'
+        '${localNow.month.toString().padLeft(2, '0')}'
+        '${localNow.day.toString().padLeft(2, '0')}_'
+        '${localNow.hour.toString().padLeft(2, '0')}'
+        '${localNow.minute.toString().padLeft(2, '0')}'
+        '${localNow.second.toString().padLeft(2, '0')}';
     final bundleId = 'diag_${stamp}_$randHex';
     final fileName = 'agh_$bundleId.zip';
 
@@ -243,7 +304,8 @@ class DiagnosticBundleService {
       return DiagnosticBundleResult(
         succeeded: false,
         bundleId: bundleId,
-        generatedAtUtc: startTime,
+        generatedAtUtc: utcNow,
+        generatedAtLocal: localNow,
         errorMessage: '无法访问应用私有缓存目录',
       );
     }
@@ -404,7 +466,8 @@ class DiagnosticBundleService {
         succeeded: false,
         cancelled: true,
         bundleId: bundleId,
-        generatedAtUtc: startTime,
+        generatedAtUtc: utcNow,
+        generatedAtLocal: localNow,
         items: itemStatuses,
         errorMessage: '已取消诊断包生成',
       );
@@ -417,7 +480,8 @@ class DiagnosticBundleService {
     void rebuildManifestAndReadme({String extraNote = ''}) {
       final manifestMap = <String, dynamic>{
         'bundle_id': bundleId,
-        'generated_at_utc': startTime.toIso8601String(),
+        'generated_at_utc': utcNow.toIso8601String(),
+        'generated_at_local': localIso,
         'manager_version': appVersion,
         'has_root': hasRoot,
         'partial_success': partial,
@@ -438,7 +502,8 @@ class DiagnosticBundleService {
 
       final readmeBuf = StringBuffer()
         ..writeln('AdGuard Home GoGoGo 诊断包 ($bundleId)')
-        ..writeln('生成时间 (UTC): ${startTime.toIso8601String()}')
+        ..writeln('生成时间 (本地): $localIso')
+        ..writeln('生成时间 (UTC): ${utcNow.toIso8601String()}')
         ..writeln('管理器版本: $appVersion')
         ..writeln('Root 权限可用: ${hasRoot ? "是" : "否 (部分诊断包)"}')
         ..writeln('隐私声明: 已按默认规则脱敏，但仍请检查内容后再分享。')
@@ -498,6 +563,11 @@ class DiagnosticBundleService {
     await tmpFile.writeAsBytes(zipBytes, flush: true);
     await tmpFile.rename(zipFile.path);
 
+    // 默认同步保存到系统公共 Download 目录（Android 10+ 走 MediaStore.Downloads），同时保留缓存副本供 FileProvider 分享
+    final dlSave = await _downloadsSaver(zipFile.path, fileName);
+    final displayPath =
+        dlSave.displayPath.isNotEmpty ? dlSave.displayPath : zipFile.path;
+
     final previewBuf = StringBuffer()
       ..writeln('【已按默认规则脱敏，但仍请检查内容后再分享。】')
       ..writeln('')
@@ -532,10 +602,13 @@ class DiagnosticBundleService {
       succeeded: true,
       partialSuccess: partial || !hasRoot,
       zipPath: zipFile.path,
+      savedDisplayPath: displayPath,
+      savedToPublicDownloads: dlSave.isPublicDownload,
       fileName: fileName,
       zipBytes: zipBytes.length,
       bundleId: bundleId,
-      generatedAtUtc: startTime,
+      generatedAtUtc: utcNow,
+      generatedAtLocal: localNow,
       items: itemStatuses,
       previewText: redactedPreview,
       summaryText: redactedSummary,

@@ -123,6 +123,7 @@ Future<void> showDiagnosticExportFlow(
                         });
                         final res = await service.exportBundle(
                           cancelToken: cancelToken,
+                          appVersion: AppConfigProvider.appVersion,
                         );
                         if (!ctx.mounted) return;
                         if (res.cancelled) {
@@ -158,6 +159,17 @@ Future<void> showDiagnosticExportFlow(
   cancelToken.cancel();
   if (result == null || !result.succeeded || !context.mounted) return;
 
+  final savedPathDisplay = result.savedDisplayPath.isNotEmpty
+      ? result.savedDisplayPath
+      : result.zipPath;
+  if (savedPathDisplay.isNotEmpty) {
+    showSnackbar(
+      appConfigProvider: appConfigProvider,
+      label: isZh ? '已保存至 $savedPathDisplay' : 'Saved to $savedPathDisplay',
+      color: Colors.green,
+    );
+  }
+
   final sizeKb = (result.zipBytes / 1024).toStringAsFixed(1);
   await showDialog<void>(
     context: context,
@@ -174,58 +186,83 @@ Future<void> showDiagnosticExportFlow(
             ),
             content: SizedBox(
               width: 520,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '${result.fileName} ($sizeKb KiB)',
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.amber.withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      isZh
-                          ? '已按默认规则脱敏，但仍请检查内容后再分享。'
-                          : 'Redacted with default rules. Please review contents before sharing.',
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${result.fileName} ($sizeKb KiB)',
                       style: const TextStyle(
-                        fontSize: 12,
+                        fontSize: 13,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  Container(
-                    height: 260,
-                    width: double.maxFinite,
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Theme.of(ctx)
-                          .colorScheme
-                          .surfaceContainerHighest
-                          .withValues(alpha: 0.5),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: SingleChildScrollView(
-                      child: SelectableText(
-                        result.previewText,
+                    if (savedPathDisplay.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.green.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          isZh
+                              ? '已保存至 $savedPathDisplay'
+                              : 'Saved to $savedPathDisplay',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 6),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.amber.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        isZh
+                            ? '已按默认规则脱敏，但仍请检查内容后再分享。'
+                            : 'Redacted with default rules. Please review contents before sharing.',
                         style: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 11.5,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 10),
+                    Container(
+                      height: 220,
+                      width: double.maxFinite,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Theme.of(ctx)
+                            .colorScheme
+                            .surfaceContainerHighest
+                            .withValues(alpha: 0.5),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: SingleChildScrollView(
+                        child: SelectableText(
+                          result.previewText,
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 11.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
             actions: [

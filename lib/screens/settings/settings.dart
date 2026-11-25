@@ -8,7 +8,6 @@ import 'package:adguard_home_manager/widgets/section_label.dart';
 import 'package:adguard_home_manager/widgets/custom_list_tile.dart';
 import 'package:adguard_home_manager/functions/snackbar.dart';
 import 'package:adguard_home_manager/widgets/module_diagnostics_sheet.dart';
-import 'package:adguard_home_manager/models/filtering_status.dart';
 import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/status_provider.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
@@ -427,59 +426,12 @@ class _SettingsWidgetState extends State<Settings> {
   }
 
   Future<void> _showProxyUrlModal(bool isZh) async {
-    final editController = TextEditingController(text: _proxyUrlController.text);
     final result = await showDialog<String>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.5),
-      builder: (ctx) => AlertDialog(
-        title: Text(isZh
-            ? '代理订阅链接 (PROXY_URL)'
-            : 'Proxy Subscription (PROXY_URL)'),
-        content: SizedBox(
-          width: 480,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              TextField(
-                controller: editController,
-                autofocus: true,
-                decoration: InputDecoration(
-                  hintText: isZh
-                      ? '填写代理订阅链接，留空则关闭模块内置代理'
-                      : 'Enter subscription URL (leave blank to disable)',
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.clear_rounded),
-                    tooltip: isZh ? '清空' : 'Clear',
-                    onPressed: () => editController.clear(),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                isZh
-                    ? '• 平时使用独立 VPN 客户端（Clash / FlClash / v2rayNG 等）时无需填写，模块会自动识别并兼容。\n'
-                        '• 填写或清空保存后立即生效，无需重启手机。'
-                    : '• Leave blank if you use a standalone VPN app (Clash / FlClash / v2rayNG); the module automatically coexists with it.\n'
-                        '• Changes take effect immediately upon saving.',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(ctx).colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: Text(isZh ? '取消' : 'Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(editController.text.trim()),
-            child: Text(isZh ? '保存并应用' : 'Save & Apply'),
-          ),
-        ],
+      builder: (_) => _ProxyUrlEditDialog(
+        initialValue: _proxyUrlController.text,
+        isZh: isZh,
       ),
     );
     if (result == null || !mounted) return;
@@ -571,40 +523,27 @@ class _SettingsWidgetState extends State<Settings> {
       return;
     }
 
-    final List<String> targetRules = List<String>.from(factoryRules);
-    if (mode == 'merge') {
-      final currentRes = await serversProvider.apiClient2!.getFilteringRules();
-      if (currentRes.successful == true) {
-        final existing = (currentRes.content as FilteringStatus).userRules;
-        final factorySet = factoryRules.map((e) => e.trim()).toSet();
-        for (final r in existing) {
-          final trimmed = r.trim();
-          if (trimmed.isNotEmpty &&
-              !factorySet.contains(trimmed) &&
-              !ModuleConfigService.deprecatedFactoryRules.contains(trimmed)) {
-            targetRules.add(r);
-          }
-        }
-      }
-    }
-
-    final postRes = await serversProvider.apiClient2!
-        .postFilteringRules(data: {'rules': targetRules});
-    if (postRes.successful == true) {
-      await serversProvider.apiClient2!.resetDnsCache();
-      await ModuleConfigService().flushSystemDnsCache();
-      await filteringProvider.fetchFilters();
-    }
+    final mutRes = await filteringProvider.restoreFactoryUserRules(
+      factoryRules: factoryRules,
+      mergeExisting: mode == 'merge',
+      deprecatedFactoryRules: ModuleConfigService.deprecatedFactoryRules,
+    );
     if (!mounted) return;
     setState(() => _restoringRules = false);
     showSnackbar(
       appConfigProvider: appConfigProvider,
-      label: postRes.successful == true
-          ? (mode == 'merge'
-              ? (isZh ? '已智能补全模块默认自定义规则' : 'Default rules merged')
-              : (isZh ? '已完全重置为模块出厂默认规则' : 'Factory rules restored'))
-          : (isZh ? '恢复规则失败，请稍后重试' : 'Failed to restore rules'),
-      color: postRes.successful == true ? Colors.green : Colors.red,
+      label: mutRes.ok
+          ? (mutRes.readbackFailed
+              ? (mutRes.message ??
+                  (isZh ? '已恢复默认规则（回读未确认）' : 'Default rules restored'))
+              : (mode == 'merge'
+                  ? (isZh ? '已智能补全模块默认自定义规则' : 'Default rules merged')
+                  : (isZh ? '已完全重置为模块出厂默认规则' : 'Factory rules restored')))
+          : (mutRes.message ??
+              (isZh ? '恢复规则失败，请稍后重试' : 'Failed to restore rules')),
+      color: mutRes.ok
+          ? (mutRes.readbackFailed ? Colors.orange : Colors.green)
+          : Colors.red,
     );
   }
 
@@ -752,6 +691,90 @@ class _SettingsWidgetState extends State<Settings> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ProxyUrlEditDialog extends StatefulWidget {
+  final String initialValue;
+  final bool isZh;
+
+  const _ProxyUrlEditDialog({
+    required this.initialValue,
+    required this.isZh,
+  });
+
+  @override
+  State<_ProxyUrlEditDialog> createState() => _ProxyUrlEditDialogState();
+}
+
+class _ProxyUrlEditDialogState extends State<_ProxyUrlEditDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialValue);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isZh = widget.isZh;
+    return AlertDialog(
+      title: Text(isZh
+          ? '代理订阅链接 (PROXY_URL)'
+          : 'Proxy Subscription (PROXY_URL)'),
+      content: SizedBox(
+        width: 480,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _controller,
+              autofocus: true,
+              decoration: InputDecoration(
+                hintText: isZh
+                    ? '填写代理订阅链接，留空则关闭模块内置代理'
+                    : 'Enter subscription URL (leave blank to disable)',
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.clear_rounded),
+                  tooltip: isZh ? '清空' : 'Clear',
+                  onPressed: () => _controller.clear(),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              isZh
+                  ? '• 平时使用独立 VPN 客户端（Clash / FlClash / v2rayNG 等）时无需填写，模块会自动识别并兼容。\n'
+                      '• 填写或清空保存后立即生效，无需重启手机。'
+                  : '• Leave blank if you use a standalone VPN app (Clash / FlClash / v2rayNG); the module automatically coexists with it.\n'
+                      '• Changes take effect immediately upon saving.',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(isZh ? '取消' : 'Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text.trim()),
+          child: Text(isZh ? '保存并应用' : 'Save & Apply'),
+        ),
+      ],
     );
   }
 }

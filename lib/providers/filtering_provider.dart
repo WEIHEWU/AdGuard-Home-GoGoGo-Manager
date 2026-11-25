@@ -186,10 +186,12 @@ class FilteringProvider with ChangeNotifier {
       final reported = (result.content is Map && result.content['updated'] is int)
           ? result.content['updated'] as int
           : 0;
+      final partial = result.content is Map && result.content['partial'] == true;
       final effectiveUpdated =
           reported > 0 ? reported : (changedListsCount > 0 ? changedListsCount : 0);
       return {
         "success": true,
+        "partial": partial,
         "data": {"updated": effectiveUpdated},
       };
     }
@@ -197,11 +199,42 @@ class FilteringProvider with ChangeNotifier {
     if (result2.successful == true && changedListsCount > 0) {
       return {
         "success": true,
+        "partial": false,
         "data": {"updated": changedListsCount},
       };
     }
 
     return {"success": false};
+  }
+
+  /// 恢复/补全模块默认自定义规则（走串行写队列与 CAS expected_revision；读取失败直接中止，绝不覆盖清空）
+  Future<RuleMutationResult> restoreFactoryUserRules({
+    required List<String> factoryRules,
+    required bool mergeExisting,
+    required Set<String> deprecatedFactoryRules,
+  }) async {
+    final mutRes = await _mutateCustomRulesOnServer(
+      (currentRules) {
+        final targetRules = List<String>.from(factoryRules);
+        if (mergeExisting) {
+          final factorySet = factoryRules.map((e) => e.trim()).toSet();
+          for (final r in currentRules) {
+            final trimmed = r.trim();
+            if (trimmed.isNotEmpty &&
+                !factorySet.contains(trimmed) &&
+                !deprecatedFactoryRules.contains(trimmed)) {
+              targetRules.add(r);
+            }
+          }
+        }
+        return targetRules;
+      },
+      entryPoint: mergeExisting ? '设置-智能补全默认规则' : '设置-重置出厂默认规则',
+    );
+    if (mutRes.ok && _statusProvider != null) {
+      unawaited(_statusProvider!.getServerStatus(withLoadingIndicator: false));
+    }
+    return mutRes;
   }
 
   Future<bool> enableDisableFiltering() async {

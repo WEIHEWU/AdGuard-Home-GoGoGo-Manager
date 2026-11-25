@@ -26,6 +26,8 @@ object AdGuardModuleController {
     private const val TAG = "AdGuardModule"
     private const val SU_PROBE_TIMEOUT_MS = 3000L
     private const val SU_CMD_TIMEOUT_MS = 8000L
+    private const val PATH_PREFIX =
+        "export PATH=/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:\$PATH; "
 
     private val probeLock = Any()
     @Volatile
@@ -304,12 +306,13 @@ object AdGuardModuleController {
     }
 
     private fun runSu(command: String): String? {
+        val fullCommand = "$PATH_PREFIX$command"
         var su = resolveSuBin() ?: return null
-        var res = runBoundedProcess(listOf(su, "-c", command), SU_CMD_TIMEOUT_MS)
+        var res = runBoundedProcess(listOf(su, "-c", fullCommand), SU_CMD_TIMEOUT_MS)
         if (res == null) {
             Log.w(TAG, "su($su) failed or timed out, re-probing")
             su = resolveSuBin(forceRefresh = true, excludeSu = su) ?: return null
-            res = runBoundedProcess(listOf(su, "-c", command), SU_CMD_TIMEOUT_MS) ?: return null
+            res = runBoundedProcess(listOf(su, "-c", fullCommand), SU_CMD_TIMEOUT_MS) ?: return null
         }
         return if (res.first == 0) {
             res.second
@@ -477,7 +480,7 @@ class AdGuardTileService : TileService() {
                 }
                 var enabled = AdGuardModuleController.getProtectionState(port)
                 if (!isGenerationActive(generation)) return@Thread
-                if (enabled == null) {
+                if (enabled == null && attempt == 0) {
                     val freshPort = AdGuardModuleController.readPort(this, forceYaml = true)
                     if (!isGenerationActive(generation)) return@Thread
                     if (freshPort != null && freshPort != port) {
@@ -505,7 +508,7 @@ class AdGuardTileService : TileService() {
     }
 
     private fun scheduleRetry(attempt: Int, generation: Int) {
-        if (attempt >= 5 || !isGenerationActive(generation)) return
+        if (attempt >= 2 || !isGenerationActive(generation)) return
         cancelPendingRetry()
         val runnable = Runnable {
             pendingRetryRunnable = null
@@ -514,7 +517,7 @@ class AdGuardTileService : TileService() {
             }
         }
         pendingRetryRunnable = runnable
-        mainHandler.postDelayed(runnable, 3000)
+        mainHandler.postDelayed(runnable, 4000)
     }
 
     private fun openManager() {

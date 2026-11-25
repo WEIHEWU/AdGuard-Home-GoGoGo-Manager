@@ -1,22 +1,31 @@
 // ignore_for_file: use_build_context_synchronously
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:adguard_home_manager/l10n/app_localizations.dart';
 
+import 'package:adguard_home_manager/classes/process_modal.dart';
 import 'package:adguard_home_manager/screens/logs/log_tile.dart';
 import 'package:adguard_home_manager/widgets/floating_search_bar.dart';
 import 'package:adguard_home_manager/widgets/log_status_indicator.dart';
+import 'package:adguard_home_manager/widgets/options_menu.dart';
 import 'package:adguard_home_manager/widgets/rule_provenance_badge.dart';
 import 'package:adguard_home_manager/constants/enums.dart';
 import 'package:adguard_home_manager/functions/copy_clipboard.dart';
 import 'package:adguard_home_manager/functions/format_time.dart';
+import 'package:adguard_home_manager/functions/get_filtered_status.dart';
 import 'package:adguard_home_manager/functions/snackbar.dart';
 import 'package:adguard_home_manager/models/applied_filters.dart';
+import 'package:adguard_home_manager/models/filtering.dart';
+import 'package:adguard_home_manager/models/logs.dart';
+import 'package:adguard_home_manager/models/menu_option.dart';
 import 'package:adguard_home_manager/providers/app_config_provider.dart';
 import 'package:adguard_home_manager/providers/filtering_provider.dart';
 import 'package:adguard_home_manager/providers/logs_provider.dart';
 import 'package:adguard_home_manager/providers/servers_provider.dart';
+import 'package:adguard_home_manager/providers/status_provider.dart';
 import 'package:adguard_home_manager/services/host_rule_diagnostics.dart';
 import 'package:adguard_home_manager/services/manual_rule_provenance_service.dart';
 
@@ -31,6 +40,12 @@ class _LogsState extends State<Logs> {
   final GlobalKey _searchButtonKey = GlobalKey();
   bool _clearing = false;
   bool _aggregateDuplicates = true;
+  List<Log>? _cachedRawItems;
+  Filtering? _cachedFiltering;
+  bool? _cachedAggregateFlag;
+  Map<int, String> _cachedFilterNames = const {};
+  Map<int, String> _cachedWhitelistNames = const {};
+  List<AggregatedLogGroup> _cachedAggregated = const [];
 
   @override
   void initState() {
@@ -98,19 +113,32 @@ class _LogsState extends State<Logs> {
     final l10n = AppLocalizations.of(context)!;
     final colorScheme = Theme.of(context).colorScheme;
     final items = logsProvider.logsData?.data ?? const [];
-    final filterNames = RuleBatchChecker.buildFilterNameMap(
-      filteringProvider.filtering?.filters ?? const [],
-    );
-    final whitelistNames = RuleBatchChecker.buildFilterNameMap(
-      filteringProvider.filtering?.whitelistFilters ?? const [],
-    );
-    final aggregated = _aggregateDuplicates
-        ? BlockedEventAggregator.aggregateRawLogs(
-            items,
-            filterNames: filterNames,
-            whitelistNames: whitelistNames,
-          )
-        : const <AggregatedLogGroup>[];
+    final filteringModel = filteringProvider.filtering;
+    if (!identical(_cachedFiltering, filteringModel)) {
+      _cachedFiltering = filteringModel;
+      _cachedFilterNames = RuleBatchChecker.buildFilterNameMap(
+        filteringModel?.filters ?? const [],
+      );
+      _cachedWhitelistNames = RuleBatchChecker.buildFilterNameMap(
+        filteringModel?.whitelistFilters ?? const [],
+      );
+      _cachedRawItems = null;
+    }
+    final filterNames = _cachedFilterNames;
+    final whitelistNames = _cachedWhitelistNames;
+    if (!identical(_cachedRawItems, items) ||
+        _cachedAggregateFlag != _aggregateDuplicates) {
+      _cachedRawItems = items;
+      _cachedAggregateFlag = _aggregateDuplicates;
+      _cachedAggregated = _aggregateDuplicates
+          ? BlockedEventAggregator.aggregateRawLogs(
+              items,
+              filterNames: filterNames,
+              whitelistNames: whitelistNames,
+            )
+          : const <AggregatedLogGroup>[];
+    }
+    final aggregated = _cachedAggregated;
 
     return Scaffold(
       appBar: AppBar(
@@ -329,12 +357,83 @@ class _AggregatedLogsPageTile extends StatelessWidget {
             : group.matchedRules.first.text)
         : group.reason;
 
+    final l10n = AppLocalizations.of(context)!;
+    final appConfigProvider =
+        Provider.of<AppConfigProvider>(context, listen: false);
+    final statusProvider = Provider.of<StatusProvider>(context, listen: false);
+    final domainBlocked = isDomainBlocked(group.reason);
     final hasPredictedBlocked = group.rawEvents.any((e) => e.predictedBlocked);
+
+    Future<void> blockUnblock({
+      required String domain,
+      required String newStatus,
+    }) async {
+      if (!context.mounted) return;
+      final processModal = ProcessModal();
+      processModal.open(l10n.savingUserFilters);
+
+      final outcome = await statusProvider.blockUnblockDomainDetailed(
+        domain: domain,
+        newStatus: newStatus,
+        entryPoint: '日志详情',
+      );
+
+      processModal.close();
+      if (!context.mounted) return;
+      if (outcome.ok) {
+        unawaited(
+          Provider.of<FilteringProvider>(context, listen: false)
+              .fetchFilters(showLoading: false),
+        );
+        if (outcome.provenanceInterrupted ||
+            outcome.provenanceSaveFailed ||
+            outcome.provenanceLegacyUnconfirmed ||
+            outcome.readbackFailed) {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: outcome.message ?? l10n.userFilteringRulesUpdated,
+            color: Colors.orange,
+          );
+        } else {
+          showSnackbar(
+            appConfigProvider: appConfigProvider,
+            label: l10n.userFilteringRulesUpdated,
+            color: Colors.green,
+          );
+        }
+      } else {
+        showSnackbar(
+          appConfigProvider: appConfigProvider,
+          label: outcome.message ?? l10n.userFilteringRulesNotUpdated,
+          color: Colors.red,
+        );
+      }
+    }
+
+    final menuOptions = <MenuOption>[
+      MenuOption(
+        title: domainBlocked ? l10n.unblockDomain : l10n.blockDomain,
+        icon: domainBlocked ? Icons.check_rounded : Icons.block_rounded,
+        action: () => blockUnblock(
+          domain: group.domain,
+          newStatus: domainBlocked ? 'unblock' : 'block',
+        ),
+      ),
+      MenuOption(
+        title: l10n.copyClipboard,
+        icon: Icons.copy_rounded,
+        action: () => copyToClipboard(
+          value: group.domain,
+          successMessage: l10n.copiedClipboard,
+        ),
+      ),
+    ];
 
     return Material(
       color: Colors.transparent,
-      child: InkWell(
-        onTap: () {
+      child: OptionsMenu(
+        options: (_) => menuOptions,
+        onTap: (_) {
           showDialog(
             context: context,
             builder: (ctx) => AlertDialog(
@@ -427,21 +526,37 @@ class _AggregatedLogsPageTile extends StatelessWidget {
                     Navigator.pop(ctx);
                     copyToClipboard(
                       value: group.domain,
-                      successMessage: AppLocalizations.of(context)!.copiedClipboard,
+                      successMessage: l10n.copiedClipboard,
                     );
                   },
-                  child: Text(AppLocalizations.of(context)!.copyClipboard),
+                  child: Text(l10n.copyClipboard),
                 ),
-                FilledButton(
+                TextButton(
                   onPressed: () => Navigator.pop(ctx),
                   child: const Text('关闭'),
+                ),
+                FilledButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    blockUnblock(
+                      domain: group.domain,
+                      newStatus: domainBlocked ? 'unblock' : 'block',
+                    );
+                  },
+                  icon: Icon(
+                    domainBlocked ? Icons.check_rounded : Icons.block_rounded,
+                    size: 18,
+                  ),
+                  label: Text(
+                    domainBlocked ? l10n.unblockDomain : l10n.blockDomain,
+                  ),
                 ),
               ],
             ),
           );
         },
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          padding: const EdgeInsets.fromLTRB(16, 10, 10, 10),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -481,9 +596,11 @@ class _AggregatedLogsPageTile extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(width: 6),
-                          Flexible(
+                          Expanded(
                             child: Text(
-                              timeStr,
+                              ruleSummary.isNotEmpty
+                                  ? '$timeStr · $ruleSummary'
+                                  : timeStr,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
@@ -492,28 +609,13 @@ class _AggregatedLogsPageTile extends StatelessWidget {
                               ),
                             ),
                           ),
-                          if (ruleSummary.isNotEmpty) ...[
-                            const SizedBox(width: 6),
-                            Expanded(
-                              flex: 2,
-                              child: Text(
-                                '· $ruleSummary',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: colorScheme.onSurfaceVariant,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 4),
               LogStatusIndicator(
                 reason: group.reason,
                 repeatCount: group.count,

@@ -26,6 +26,12 @@ class _AddCustomRuleState extends State<AddCustomRule> {
 
   bool _addImportant = true;
 
+  @override
+  void dispose() {
+    _domainController.dispose();
+    super.dispose();
+  }
+
   bool _checkValidValues() {
     if (
       _domainController.text != '' && 

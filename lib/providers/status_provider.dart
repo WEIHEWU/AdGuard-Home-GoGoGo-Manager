@@ -65,6 +65,7 @@ class StatusProvider with ChangeNotifier {
   int _remaining = 0;
   bool _disposed = false;
   bool _refreshingAfterCountdown = false;
+  int? _lastBlockingStatusCode;
   final ValueNotifier<int> remainingTimeNotifier = ValueNotifier<int>(0);
 
   @override
@@ -98,6 +99,8 @@ class StatusProvider with ChangeNotifier {
   FilteringStatus? get filteringStatus {
     return _filteringStatus;
   }
+
+  int? get lastBlockingStatusCode => _lastBlockingStatusCode;
 
   int get remainingTime {
     return _remaining;
@@ -212,6 +215,7 @@ class StatusProvider with ChangeNotifier {
 
   Future<bool> updateBlocking(
       {required String block, required bool newStatus, int? time}) async {
+    _lastBlockingStatusCode = null;
     switch (block) {
       case 'general':
         _protectionsManagementProcess.add('general');
@@ -243,6 +247,8 @@ class StatusProvider with ChangeNotifier {
           notifyListeners();
           return true;
         } else {
+          _lastBlockingStatusCode = result.statusCode;
+          notifyListeners();
           return false;
         }
 
@@ -263,6 +269,8 @@ class StatusProvider with ChangeNotifier {
           notifyListeners();
           return true;
         } else {
+          _lastBlockingStatusCode = result.statusCode;
+          notifyListeners();
           return false;
         }
 
@@ -338,8 +346,9 @@ class StatusProvider with ChangeNotifier {
       if (addr != null && addr.isNotEmpty) {
         await _serversProvider!.autoConnectModule(addr);
         final selected = _serversProvider!.selectedServer;
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('moduleHttpAddress', addr);
         if (selected != null && selected.port != null) {
-          final prefs = await SharedPreferences.getInstance();
           await prefs.setInt('adguard_port', selected.port!);
         }
         result = await _serversProvider!.apiClient2!.getServerStatus();
@@ -399,9 +408,6 @@ class StatusProvider with ChangeNotifier {
       } else if (newStatus == 'unblock') {
         newRules.add("@@||$domain^\$important");
       }
-      FilteringStatus newObj = _serverStatus!.filteringStatus;
-      newObj.userRules = newRules;
-      _filteringStatus = newObj;
 
       final result = await api.postFilteringRules(
         data: {
@@ -426,6 +432,7 @@ class StatusProvider with ChangeNotifier {
             confirmRes.content is FilteringStatus) {
           final confirmed = confirmRes.content as FilteringStatus;
           _filteringStatus = confirmed;
+          _serverStatus!.filteringStatus.userRules = confirmed.userRules;
           final provOut = await _provenanceService.applyCommitBoundDiff(
             serverKey: session.serverKey,
             rulesBeforeCommit: beforeRules,
@@ -441,6 +448,17 @@ class StatusProvider with ChangeNotifier {
           provenanceLegacyUnconfirmed = provOut.legacyUnconfirmed;
           outcomeMessage = provOut.message;
         } else {
+          final optimistic = FilteringStatus(
+            filters: fetched.filters,
+            whitelistFilters: fetched.whitelistFilters,
+            userRules: newRules,
+            userRulesRevision:
+                result.userRulesRevisionHeader ?? fetched.userRulesRevision,
+            interval: fetched.interval,
+            enabled: fetched.enabled,
+          );
+          _filteringStatus = optimistic;
+          _serverStatus!.filteringStatus.userRules = newRules;
           await _provenanceService.syncWithCoreRules(
             serverKey: session.serverKey,
             coreRules: beforeRules,
@@ -471,6 +489,7 @@ class StatusProvider with ChangeNotifier {
               refreshed.content is FilteringStatus) {
             final fs = refreshed.content as FilteringStatus;
             _filteringStatus = fs;
+            _serverStatus!.filteringStatus.userRules = fs.userRules;
             await _provenanceService.syncWithCoreRules(
               serverKey: session.serverKey,
               coreRules: fs.userRules,

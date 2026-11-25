@@ -53,14 +53,15 @@ class _FiltersState extends State<Filters> {
       ProcessModal processModal = ProcessModal();
       processModal.open(AppLocalizations.of(context)!.updatingLists);
       final result = await filteringProvider.updateLists();
-      if (!mounted) return;
       processModal.close();
+      if (!mounted) return;
       if (result['success'] == true) {
+        final partial = result['partial'] == true;
         showSnackbar(
             appConfigProvider: appConfigProvider,
             label:
                 "${result['data']['updated']} ${AppLocalizations.of(context)!.listsUpdated}",
-            color: Colors.green);
+            color: partial ? Colors.orange : Colors.green);
       } else {
         showSnackbar(
             appConfigProvider: appConfigProvider,

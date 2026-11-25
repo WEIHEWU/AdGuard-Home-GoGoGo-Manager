@@ -59,6 +59,7 @@ class LogTile extends StatelessWidget {
             ? '${matchedRules.first.sourceName}: ${matchedRules.first.text}'
             : matchedRules.first.text)
         : log.reason;
+    final timeStr = convertTimestampLocalTimezone(log.time, 'HH:mm:ss');
     String? elapsedText;
     if (log.elapsedMs.isNotEmpty) {
       final parsed = double.tryParse(log.elapsedMs);
@@ -231,7 +232,7 @@ class LogTile extends StatelessWidget {
           );
         },
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          padding: const EdgeInsets.fromLTRB(16, 10, 10, 10),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -271,9 +272,11 @@ class LogTile extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(width: 6),
-                          Flexible(
+                          Expanded(
                             child: Text(
-                              convertTimestampLocalTimezone(log.time, 'HH:mm:ss'),
+                              ruleSummary.isNotEmpty
+                                  ? '$timeStr · $ruleSummary'
+                                  : timeStr,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
@@ -282,28 +285,13 @@ class LogTile extends StatelessWidget {
                               ),
                             ),
                           ),
-                          if (ruleSummary.isNotEmpty) ...[
-                            const SizedBox(width: 6),
-                            Expanded(
-                              flex: 2,
-                              child: Text(
-                                '· $ruleSummary',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: colorScheme.onSurfaceVariant,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 4),
               LogStatusIndicator(reason: log.reason),
             ],
           ),

@@ -4,6 +4,7 @@ import android.app.LocaleManager
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -11,7 +12,10 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.Drawable
 import android.os.Build
+import android.os.Environment
 import android.os.LocaleList
+import android.os.SystemClock
+import android.provider.MediaStore
 import android.service.quicksettings.TileService
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -40,13 +44,19 @@ class MainActivity: FlutterActivity() {
     private var cachedInstalledAppsIncludeSystem: Boolean = false
     @Volatile
     private var cachedInstalledAppsTimestamp: Long = 0L
+    @Volatile
+    private var lastTileSyncElapsedMs: Long = 0L
 
     override fun onStart() {
         super.onStart()
-        TileService.requestListeningState(
-            this,
-            ComponentName(this, AdGuardTileService::class.java)
-        )
+        val now = SystemClock.elapsedRealtime()
+        if (lastTileSyncElapsedMs == 0L || now - lastTileSyncElapsedMs >= 15_000L) {
+            lastTileSyncElapsedMs = now
+            TileService.requestListeningState(
+                this,
+                ComponentName(this, AdGuardTileService::class.java)
+            )
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -208,9 +218,146 @@ class MainActivity: FlutterActivity() {
                         result.error("SHARE_FAILED", t.message, null)
                     }
                 }
+                "saveDiagBundleToDownloads" -> {
+                    val filePath = call.argument<String>("filePath")
+                    val requestedName = call.argument<String>("fileName")
+                    if (filePath.isNullOrBlank()) {
+                        result.error("INVALID_ARG", "Missing filePath", null)
+                        return@setMethodCallHandler
+                    }
+                    val cacheDiagDir = File(cacheDir, "diag_bundles").canonicalFile
+                    val targetFile = File(filePath).canonicalFile
+                    if (!targetFile.exists() || !targetFile.isFile ||
+                        !targetFile.path.startsWith(cacheDiagDir.path + File.separator)
+                    ) {
+                        result.error("INVALID_PATH", "Bundle file not found in cache diag dir", null)
+                        return@setMethodCallHandler
+                    }
+                    val rawBase = File(
+                        if (!requestedName.isNullOrBlank()) requestedName else targetFile.name
+                    ).name
+                    val safeName = if (rawBase.isBlank() || rawBase == "." || rawBase == "..") {
+                        targetFile.name
+                    } else if (rawBase.endsWith(".zip", ignoreCase = true)) {
+                        rawBase
+                    } else {
+                        "$rawBase.zip"
+                    }
+                    Thread {
+                        try {
+                            val savedInfo = saveZipToDownloadsOrFallback(targetFile, safeName)
+                            runOnUiThread { result.success(savedInfo) }
+                        } catch (t: Throwable) {
+                            runOnUiThread {
+                                result.error("SAVE_FAILED", t.message, null)
+                            }
+                        }
+                    }.start()
+                }
                 else -> result.notImplemented()
             }
         }
+    }
+
+    private fun saveZipToDownloadsOrFallback(sourceFile: File, fileName: String): Map<String, Any?> {
+        // Android 10+ (API 29+): 直接通过 MediaStore.Downloads 写入系统公共 Download 目录，无需额外存储权限
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/zip")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            var itemUri: android.net.Uri? = null
+            try {
+                itemUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (itemUri != null) {
+                    val out = resolver.openOutputStream(itemUri)
+                        ?: throw IllegalStateException("openOutputStream returned null")
+                    out.use { output ->
+                        sourceFile.inputStream().use { input ->
+                            input.copyTo(output)
+                        }
+                        output.flush()
+                    }
+                    val publishValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    }
+                    resolver.update(itemUri, publishValues, null, null)
+                    var actualName = fileName
+                    resolver.query(
+                        itemUri,
+                        arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+                        null,
+                        null,
+                        null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val col = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                            if (col >= 0) {
+                                val queried = cursor.getString(col)
+                                if (!queried.isNullOrBlank()) {
+                                    actualName = queried
+                                }
+                            }
+                        }
+                    }
+                    return mapOf(
+                        "saved" to true,
+                        "displayPath" to "${Environment.DIRECTORY_DOWNLOADS}/$actualName",
+                        "isPublicDownload" to true
+                    )
+                }
+            } catch (_: Throwable) {
+                if (itemUri != null) {
+                    try {
+                        resolver.delete(itemUri, null, null)
+                    } catch (_: Throwable) {}
+                }
+            }
+        } else {
+            // Android 9 及以下：尝试写入公共 Downloads 目录，失败则降级至应用私有目录
+            try {
+                @Suppress("DEPRECATION")
+                val publicDownloads = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_DOWNLOADS
+                )
+                if (publicDownloads != null && (publicDownloads.exists() || publicDownloads.mkdirs())) {
+                    val destFile = File(publicDownloads, fileName)
+                    sourceFile.inputStream().use { input ->
+                        destFile.outputStream().use { output ->
+                            input.copyTo(output)
+                            output.flush()
+                        }
+                    }
+                    return mapOf(
+                        "saved" to true,
+                        "displayPath" to "${Environment.DIRECTORY_DOWNLOADS}/${destFile.name}",
+                        "isPublicDownload" to true
+                    )
+                }
+            } catch (_: Throwable) {}
+        }
+
+        // 公共 Download 写入失败时的应用私有目录兜底
+        val fallbackDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: File(filesDir, "Download")
+        if (!fallbackDir.exists()) {
+            fallbackDir.mkdirs()
+        }
+        val fallbackFile = File(fallbackDir, fileName)
+        sourceFile.inputStream().use { input ->
+            fallbackFile.outputStream().use { output ->
+                input.copyTo(output)
+                output.flush()
+            }
+        }
+        return mapOf(
+            "saved" to true,
+            "displayPath" to fallbackFile.absolutePath,
+            "isPublicDownload" to false
+        )
     }
 
     private fun queryInstalledApps(includeSystem: Boolean): List<Map<String, Any?>> {

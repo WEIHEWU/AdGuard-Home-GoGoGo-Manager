@@ -30,6 +30,12 @@ class _EditCustomRulesState extends State<EditCustomRules> {
 
     super.initState();
   }
+
+  @override
+  void dispose() {
+    _fieldController.dispose();
+    super.dispose();
+  }
   
   @override
   Widget build(BuildContext context) {

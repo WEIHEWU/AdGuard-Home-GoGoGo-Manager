@@ -55,7 +55,7 @@ class HttpRequestClient {
 
   static void _resetClient() {
     try {
-      _sharedClient?.close(force: true);
+      _sharedClient?.close(force: false);
     } catch (_) {}
     _sharedClient = null;
   }
@@ -77,7 +77,10 @@ class HttpRequestClient {
       }
       final HttpClientResponse response =
           await request.close().timeout(Duration(seconds: timeout));
-      final String reply = await response.transform(utf8.decoder).join();
+      final String reply = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(Duration(seconds: timeout));
       return HttpResponse(
         successful: response.statusCode >= 400 ? false : true,
         body: reply,
@@ -145,7 +148,6 @@ class HttpRequestClient {
     required Server server,
     dynamic body,
     int timeout = 10,
-    bool isRetry = false,
   }) async {
     final String connectionString =
         getConnectionString(server: server, urlPath: urlPath);
@@ -160,7 +162,10 @@ class HttpRequestClient {
       request.add(utf8.encode(json.encode(body)));
       final HttpClientResponse response =
           await request.close().timeout(Duration(seconds: timeout));
-      final String reply = await response.transform(utf8.decoder).join();
+      final String reply = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(Duration(seconds: timeout));
       return HttpResponse(
         successful: response.statusCode >= 400 ? false : true,
         body: reply,
@@ -184,15 +189,6 @@ class HttpRequestClient {
       );
     } on HttpException {
       _resetClient();
-      if (!isRetry) {
-        return post(
-          urlPath: urlPath,
-          server: server,
-          body: body,
-          timeout: timeout,
-          isRetry: true,
-        );
-      }
       return const HttpResponse(
         successful: false,
         body: null,
@@ -221,7 +217,6 @@ class HttpRequestClient {
     required Server server,
     dynamic body,
     int timeout = 10,
-    bool isRetry = false,
   }) async {
     final String connectionString =
         getConnectionString(server: server, urlPath: urlPath);
@@ -236,7 +231,10 @@ class HttpRequestClient {
       request.add(utf8.encode(json.encode(body)));
       final HttpClientResponse response =
           await request.close().timeout(Duration(seconds: timeout));
-      final String reply = await response.transform(utf8.decoder).join();
+      final String reply = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(Duration(seconds: timeout));
       return HttpResponse(
         successful: response.statusCode >= 400 ? false : true,
         body: reply,
@@ -260,15 +258,6 @@ class HttpRequestClient {
       );
     } on HttpException {
       _resetClient();
-      if (!isRetry) {
-        return put(
-          urlPath: urlPath,
-          server: server,
-          body: body,
-          timeout: timeout,
-          isRetry: true,
-        );
-      }
       return const HttpResponse(
         successful: false,
         body: null,

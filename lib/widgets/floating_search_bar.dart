@@ -37,6 +37,12 @@ class _SearchState extends State<FloatingSearchBar> {
   }
 
   @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final position = widget.searchButtonRenderBox?.localToGlobal(Offset.zero);
     final topPadding = MediaQuery.of(globalNavigatorKey.currentContext!).viewPadding.top;

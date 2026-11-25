@@ -382,6 +382,7 @@ class ModuleConfigService {
   final SuProbeCandidateRunner? _probeCandidateRunner;
   final Duration _suProbeTimeout;
   final Duration _mutationWaitTimeout;
+  final Duration _mutationSuTimeout;
   final bool? _isAndroidOverride;
 
   ModuleConfigService({
@@ -390,12 +391,14 @@ class ModuleConfigService {
     SuProbeCandidateRunner? probeCandidateRunner,
     Duration suProbeTimeout = const Duration(seconds: 3),
     Duration mutationWaitTimeout = const Duration(seconds: 25),
+    Duration mutationSuTimeout = const Duration(seconds: 25),
     bool? isAndroidOverride,
   })  : _processRunner = processRunner ?? Process.run,
         _processStarter = processStarter,
         _probeCandidateRunner = probeCandidateRunner,
         _suProbeTimeout = suProbeTimeout,
         _mutationWaitTimeout = mutationWaitTimeout,
+        _mutationSuTimeout = mutationSuTimeout,
         _isAndroidOverride = isAndroidOverride;
 
   bool get _isAndroid => _isAndroidOverride ?? Platform.isAndroid;
@@ -663,15 +666,44 @@ class ModuleConfigService {
     return null;
   }
 
-  Future<ProcessResult> _runSu(String command) async {
+  Future<ProcessResult> _runSu(
+    String command, {
+    Duration timeout = const Duration(seconds: 8),
+    int maxOutputBytes = 393216,
+  }) async {
     var su = await _resolveSuBin();
     if (su == null) {
       return ProcessResult(0, 1, '', 'su unavailable');
     }
+    final args = <String>['-c', '$_pathPrefix$command'];
+
+    final starter = _processStarter;
+    if (starter == null && !identical(_processRunner, Process.run)) {
+      try {
+        return await _processRunner(su, args).timeout(timeout);
+      } on TimeoutException {
+        return ProcessResult(0, 124, '', 'command_timeout');
+      } catch (_) {
+        final failedSu = su;
+        _cachedSuBin = null;
+        su = await _resolveSuBin(forceRefresh: true, excludeSu: failedSu);
+        if (su == null) {
+          return ProcessResult(0, 1, '', 'su unavailable');
+        }
+        try {
+          return await _processRunner(su, args).timeout(timeout);
+        } on TimeoutException {
+          return ProcessResult(0, 124, '', 'command_timeout');
+        } catch (e) {
+          return ProcessResult(0, 1, '', e.toString());
+        }
+      }
+    }
+
+    Process process;
     try {
-      return await _processRunner(su, ['-c', '$_pathPrefix$command']);
+      process = await (starter ?? Process.start)(su, args);
     } catch (_) {
-      // Cached su binary could not be launched (e.g. path removed); re-probe once.
       final failedSu = su;
       _cachedSuBin = null;
       su = await _resolveSuBin(forceRefresh: true, excludeSu: failedSu);
@@ -679,11 +711,28 @@ class ModuleConfigService {
         return ProcessResult(0, 1, '', 'su unavailable');
       }
       try {
-        return await _processRunner(su, ['-c', '$_pathPrefix$command']);
+        process = await (starter ?? Process.start)(su, args);
       } catch (e) {
         return ProcessResult(0, 1, '', e.toString());
       }
     }
+
+    final res = await _executeProcessBounded(
+      process,
+      timeout: timeout,
+      maxOutputBytes: maxOutputBytes,
+    );
+    final capturedOut = res.truncated && res.stdout.isNotEmpty
+        ? '${res.stdout}\n[...truncated...]'
+        : res.stdout;
+
+    if (res.timedOut) {
+      final errTag = res.exitConfirmed
+          ? 'command_timeout'
+          : 'command_timeout;unconfirmed_exit';
+      return ProcessResult(res.pid, 124, capturedOut, errTag);
+    }
+    return ProcessResult(res.pid, res.exitCode, capturedOut, res.stderr);
   }
 
   Future<bool> hasRoot() async {
@@ -901,7 +950,7 @@ class ModuleConfigService {
         _cachedProxyUrl != null &&
         _cachedProxyUrlTime != null &&
         DateTime.now().difference(_cachedProxyUrlTime!) <
-            const Duration(seconds: 5)) {
+            const Duration(seconds: 30)) {
       return _cachedProxyUrl!;
     }
     try {
@@ -995,7 +1044,7 @@ class ModuleConfigService {
         _cachedDiag != null &&
         _cachedDiagTime != null &&
         DateTime.now().difference(_cachedDiagTime!) <
-            const Duration(seconds: 5)) {
+            const Duration(seconds: 30)) {
       return Map<String, dynamic>.from(_cachedDiag!);
     }
     try {
@@ -1236,6 +1285,7 @@ echo "ALLOW=\$allow_cnt"
       final result = await _runSu(
         'rm -f /dev/shm/agh_manual_stop /data/adb/agh/run/agh_manual_stop /data/adb/agh/manual_stop /data/adb/agh/stopped /data/adb/agh/app_pause_active 2>/dev/null; '
         '$envPrefix/system/bin/sh /data/adb/agh/scripts/switch_mode.sh $normalized 2>&1',
+        timeout: _mutationSuTimeout,
       );
       scriptWaitSw.stop();
       _cachedDiag = null;
@@ -1400,6 +1450,7 @@ echo "ALLOW=\$allow_cnt"
         'else '
         '  /system/bin/sh /data/adb/agh/scripts/iptables.sh --reload 2>&1; '
         'fi',
+        timeout: _mutationSuTimeout,
       );
       _cachedDiag = null;
       _cachedDiagTime = null;
@@ -1895,7 +1946,7 @@ printf '%s\\n' '$escaped' > /data/adb/agh/app-allow.txt
 chmod 644 /data/adb/agh/app-allow.txt
 /system/bin/sh /data/adb/agh/scripts/iptables.sh --apply-allowlist 2>&1
 ''';
-      final result = await _runSu(cmd);
+      final result = await _runSu(cmd, timeout: const Duration(seconds: 20));
       _cachedDiag = null;
       _cachedDiagTime = null;
       final res = FirewallReloadResult.fromScriptOutput(

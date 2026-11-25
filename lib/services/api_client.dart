@@ -70,7 +70,10 @@ class ApiClientV2 {
       server: server,
       body: {'enabled': enable},
     );
-    return ApiResponse(successful: result.successful);
+    return ApiResponse(
+      successful: result.successful,
+      statusCode: result.statusCode,
+    );
   }
 
   Future<ApiResponse> updateSafeBrowsing({required bool enable}) async {
@@ -90,7 +93,10 @@ class ApiClientV2 {
       server: server,
       body: {'enabled': enable, 'duration': time},
     );
-    return ApiResponse(successful: result.successful);
+    return ApiResponse(
+      successful: result.successful,
+      statusCode: result.statusCode,
+    );
   }
 
   Future<ApiResponse> getLogs({
@@ -466,9 +472,23 @@ class ApiClientV2 {
       server: server,
       body: body,
     );
-    return ApiResponse(
-      successful: result.successful,
-      content: result.body != null ? jsonDecode(result.body!) : null,
-    );
+    if (result.body == null) {
+      return ApiResponse(
+        successful: result.successful,
+        statusCode: result.statusCode,
+      );
+    }
+    try {
+      return ApiResponse(
+        successful: result.successful,
+        content: jsonDecode(result.body!),
+        statusCode: result.statusCode,
+      );
+    } catch (_) {
+      return ApiResponse(
+        successful: false,
+        statusCode: result.statusCode,
+      );
+    }
   }
 }

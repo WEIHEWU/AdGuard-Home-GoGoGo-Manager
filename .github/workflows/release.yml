@@ -24,7 +24,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME:-}" in
             v*) VERSION_TAG="$GITHUB_REF_NAME" ;;
-            *)  VERSION_TAG="v2.24.28" ;;
+            *)  VERSION_TAG="v2.24.29" ;;
           esac
           case "$VERSION_TAG" in
             *-rc*|*beta*|*candidate*) IS_PRERELEASE="true"; MAKE_LATEST="false"; TITLE_SUFFIX=" (Pre-release)" ;;
@@ -48,15 +48,16 @@ jobs:
 
             **AdGuard-Home-GoGoGo Manager - 专为 [AdGuard-Home-GoGoGo](https://github.com/WEIHEWU/AdGuard-Home-GoGoGo) 打造的轻量现代化 Android 控制面板**（桌面名称：`AdGuard Home GoGoGo`，快捷磁贴：`AGH GoGoGo`，包名：`com.wu.adgogogo`）。
 
-            > ⚠️ **验证与实机状态说明**：Manager 静态分析（`flutter analyze --no-fatal-infos`）、51 项单元与 Widget 测试及 APK 签名包体核验已通过；本端环境未连接实机（`adb devices -l` 为空），候选版以来的真机视觉与端到端交互验收尚未在实机执行，升级后请以实际设备展示为准。
+            > ✅ **验证状态**：`flutter analyze --no-pub --no-fatal-infos`（0 error / 0 warning）、全量 56 项单元与 Widget 测试及 `arm64-v8a` 混淆 Release APK（`2.24.29+199`，`8,873,878 B`，SHA-256: `d30e2725483f3d2420259efaaf2b867c55a6f86e3e86f1bae784718d02ad5640`）核验通过。
 
-            #### 本次调整说明（日志列表紧凑布局）
-            - **删除独立展开箭头列与空占位**：普通行与聚合行统一采用紧凑状态列，彻底消除由于箭头列存在引起的视觉不对齐与空白占位冗余。
-            - **重复次数移至右侧状态区**：当且仅当重复次数 > 1 时在状态文字下方展示 `×N`（超过万次时自动精简为 `×10k`），不撑宽卡片，且为读屏提供完整无障碍语义支持（“已放行，重复 8 次” / “Processed, repeated 8 times”）。
-            - **重新分配第二行左侧空间**：移除原有的“重复 N 次”副标题文本，为协议标签、时间与规则来源/规则摘要（`· 规则摘要`）释放充足横向空间，超长时安全截断且在 300dp 极窄屏幕与 1.8x 大字号下无任何 RenderFlex 溢出。
-            - **交互行为与过滤策略保持不变**：点击整行继续弹出完整详情对话框，Core 二进制、过滤规则、订阅及网络策略完全保持不变。
+            #### 本次正式版更新内容（可靠性、诊断导出与聚合日志增强）
+            - **诊断包默认保存至系统公共 `Download` 目录**：新增 `MediaStore.Downloads` 原生通道（Android 10+ 免存储权限直写公共 `Download/agh_diag_*.zip`，Android 9 及以下兼容公共目录并保留私有目录兜底），界面明确提示保存路径（`已保存至 Download/...`），同时保留系统分享入口。
+            - **诊断包采用设备本地时间命名**：`agh_diag_YYYYMMDD_HHMMSS_xxxx.zip`、`bundle_id` 与 `manifest.json` / `00_README_AND_MANIFEST.txt` 统一以设备本地时间生成并在正文同时记录 `generated_at_local`（含时区偏移）与 `generated_at_utc`。
+            - **诊断包版本号与只读隔离对齐**：统一通过 `AppConfigProvider.appVersion` 注入管理器版本，全量采集严格只读（耗时预算 20s，不抢占操作锁、不修改规则、不重启核心）。
+            - **聚合日志详情弹窗支持一键放行 / 拦截**：保持日志列表行紧凑对齐与右侧无额外按钮布局不变，在点击聚合日志后的详情弹窗 / 长按菜单内提供带 `$important` 的直接放行与拦截操作。
+            - **稳定性与并发队列加固**：修复挂起 `su` 进程超时后强制 `kill()` 回收并清空串行队列、强化恢复出厂规则 `getFiltering()` 失败防清空门控、同步等待动态端口就绪、清理各界面控制器泄露及有界化请求体读取与响应码透传。
 
             #### 升级提示
-            - 本次为管理器 UI 紧凑布局优化；覆盖安装 Manager APK（`2.24.28+197`）即可生效。
+            - 覆盖安装 Manager APK（`2.24.29+199`）或直接刷入模块 `v20261125.1` 即可自动完成更新。
           files: |
             releases/AdGuardHomeManager.apk

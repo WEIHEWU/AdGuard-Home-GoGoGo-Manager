@@ -97,62 +97,30 @@ class _AppAllowlistModalState extends State<AppAllowlistModal> {
           : '保存失败，请检查 Root 权限',
       color: ok ? Colors.green : Colors.red,
     );
-    Navigator.of(context).pop(true);
+    if (ok) {
+      Navigator.of(context).pop(true);
+    }
   }
 
   void _showAddCustomPackageDialog() {
-    final controller = TextEditingController();
-    showDialog(
+    showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('手动输入包名'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              '请输入应用的完整 Android 包名（例如 com.example.app）：',
-              style: TextStyle(fontSize: 14),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: 'com.package.name',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final pkg = controller.text.trim();
-              if (pkg.isNotEmpty) {
-                setState(() {
-                  _selectedPackages.add(pkg);
-                  if (!_installedApps.any((e) => e['package'] == pkg)) {
-                    _installedApps.insert(0, <String, dynamic>{
-                      'package': pkg,
-                      'name': pkg,
-                      'uid': null,
-                      'isSystem': false,
-                      'icon': null,
-                    });
-                  }
-                });
-              }
-              Navigator.of(ctx).pop();
-            },
-            child: const Text('添加'),
-          ),
-        ],
-      ),
-    );
+      builder: (_) => const _AddCustomPackageDialog(),
+    ).then((pkg) {
+      if (!mounted || pkg == null || pkg.isEmpty) return;
+      setState(() {
+        _selectedPackages.add(pkg);
+        if (!_installedApps.any((e) => e['package'] == pkg)) {
+          _installedApps.insert(0, <String, dynamic>{
+            'package': pkg,
+            'name': pkg,
+            'uid': null,
+            'isSystem': false,
+            'icon': null,
+          });
+        }
+      });
+    });
   }
 
   @override
@@ -399,6 +367,59 @@ class _AppAllowlistModalState extends State<AppAllowlistModal> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AddCustomPackageDialog extends StatefulWidget {
+  const _AddCustomPackageDialog();
+
+  @override
+  State<_AddCustomPackageDialog> createState() =>
+      _AddCustomPackageDialogState();
+}
+
+class _AddCustomPackageDialogState extends State<_AddCustomPackageDialog> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('手动输入包名'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+            '请输入应用的完整 Android 包名（例如 com.example.app）：',
+            style: TextStyle(fontSize: 14),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: 'com.package.name',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text.trim()),
+          child: const Text('添加'),
+        ),
+      ],
     );
   }
 }
